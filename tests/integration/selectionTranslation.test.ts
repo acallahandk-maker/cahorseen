@@ -1,0 +1,339 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+    translationEventSchema,
+    translationIpcChannels,
+    translationAckSchema,
+    type ProviderConfig,
+    type SelectionCapture,
+    type TranslationTask
+} from '../../src/shared/contracts';
+import {
+    registerIpcRouter,
+    type SelectionIpcService
+} from '../../src/main/ipcRouter';
+import {
+    TranslationWorkerRunner,
+    type TranslationRunnerRequest
+} from '../../src/main/workers/translationWorker';
+import {
+    SelectionService,
+    type SelectionCaptureAdapter
+} from '../../src/main/services/selectionService';
+
+const SYNTHETIC_API_KEY = 'synthetic-api-key-never-logged';
+const provider: ProviderConfig = {
+    id: 'synthetic-provider',
+    name: 'Synthetic Provider',
+    baseUrl: 'https://provider.example/v1',
+    apiKey: SYNTHETIC_API_KEY,
+    textModel: 'synthetic-text-model',
+    visionModel: 'synthetic-vision-model',
+    targetLanguage: 'zh-CN'
+};
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+    await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, {
+        recursive: true,
+        force: true
+    })));
+});
+
+function adapter(overrides: Partial<SelectionCaptureAdapter> = {}): SelectionCaptureAdapter {
+    return {
+        readAccessibilitySelection: vi.fn(async () => 'selected text'),
+        copySelectionToClipboard: vi.fn(async () => undefined),
+        readClipboardText: vi.fn(async () => 'clipboard selection'),
+        saveClipboard: vi.fn(async () => ({ items: ['original'] })),
+        restoreClipboard: vi.fn(async () => undefined),
+        ...overrides
+    };
+}
+
+async function createWorkerScript(source: string): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), 'desktop-pet-translation-worker-'));
+    temporaryDirectories.push(directory);
+    const workerPath = join(directory, 'worker.cjs');
+    await writeFile(workerPath, source, 'utf8');
+    return workerPath;
+}
+
+describe('selection translation integration', () => {
+    it('runs translation request work in a worker thread and streams deltas', async () => {
+        const workerPath = await createWorkerScript(`
+            const { parentPort, workerData } = require('node:worker_threads');
+            parentPort.postMessage({ type: 'delta', taskId: workerData.taskId, delta: 'ni' });
+            parentPort.postMessage({ type: 'delta', taskId: workerData.taskId, delta: 'hao' });
+            parentPort.postMessage({
+                type: 'completed',
+                taskId: workerData.taskId,
+                translatedText: '你好',
+                model: 'synthetic-text-model'
+            });
+        `);
+        const runner = new TranslationWorkerRunner({ workerPath });
+        const request: TranslationRunnerRequest = {
+            taskId: 'worker-task',
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'zh-CN'
+        };
+        const deltas: string[] = [];
+
+        await expect(runner.run(request, undefined, (delta) => {
+            deltas.push(delta);
+        })).resolves.toEqual({
+            translatedText: '你好',
+            model: 'synthetic-text-model'
+        });
+        expect(deltas).toEqual(['ni', 'hao']);
+    });
+
+    it('sanitizes worker failures and never returns the synthetic API key', async () => {
+        const workerPath = await createWorkerScript(`
+            const { parentPort, workerData } = require('node:worker_threads');
+            parentPort.postMessage({
+                type: 'failed',
+                taskId: workerData.taskId,
+                code: 'network',
+                message: 'synthetic secret failure ${SYNTHETIC_API_KEY}'
+            });
+        `);
+        const runner = new TranslationWorkerRunner({ workerPath });
+
+        await expect(runner.run({
+            taskId: 'failed-task',
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'zh-CN'
+        })).rejects.toMatchObject({
+            name: 'ProviderError',
+            code: 'network',
+            message: 'Provider request failed.'
+        });
+    });
+
+    it('rejects unknown selection capture payloads at the IPC boundary', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const selection: SelectionIpcService = {
+            captureSelectionOnce: vi.fn(async (): Promise<SelectionCapture> => ({
+                sourceText: 'selected text',
+                method: 'accessibility',
+                clipboardRestored: true
+            })),
+            translateSelection: vi.fn(async (): Promise<TranslationTask> => ({
+                id: 'task-1',
+                status: 'completed',
+                sourceText: 'selected text',
+                translatedText: 'selected text',
+                targetLanguage: 'zh-CN'
+            }))
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn()
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+
+        const result = await handlers.get(translationIpcChannels.captureSelection)?.({}, {
+            unexpected: true
+        });
+
+        expect(result).toEqual({
+            ok: false,
+            error: {
+                code: 'invalid-request',
+                message: 'Selection capture request is invalid.'
+            }
+        });
+        expect(selection.captureSelectionOnce).not.toHaveBeenCalled();
+    });
+
+    it('streams typed IPC events and records repeated source text once in one task', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const sends: unknown[] = [];
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const selection: SelectionIpcService = {
+            captureSelectionOnce: vi.fn(async (): Promise<SelectionCapture> => ({
+                sourceText: 'repeat repeat repeat',
+                method: 'accessibility' as const,
+                clipboardRestored: true
+            })),
+            translateSelection: vi.fn(async (options?: {
+                signal?: AbortSignal;
+                taskId?: string;
+                onTaskId?: (taskId: string) => void;
+                onDelta?: (delta: string) => void;
+            }): Promise<TranslationTask> => {
+                const taskId = options?.taskId ?? 'task-1';
+                options?.onTaskId?.(taskId);
+                options?.onDelta?.('repeated');
+                return {
+                    id: taskId,
+                    status: 'completed',
+                    sourceText: 'repeat repeat repeat',
+                    translatedText: '重复',
+                    targetLanguage: 'zh-CN'
+                };
+            })
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn()
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+        const event = {
+            sender: {
+                send: (channel: string, payload: unknown) => {
+                    expect(channel).toBe(translationIpcChannels.event);
+                    sends.push(translationEventSchema.parse(payload));
+                }
+            }
+        };
+
+        const result = await handlers.get(translationIpcChannels.translateSelection)?.(event, {
+            taskId: 'task-ipc'
+        });
+
+        expect(selection.translateSelection).toHaveBeenCalledTimes(1);
+        expect(result).toEqual({
+            ok: true,
+            value: {
+                id: 'task-ipc',
+                status: 'completed',
+                sourceText: 'repeat repeat repeat',
+                translatedText: '重复',
+                targetLanguage: 'zh-CN'
+            }
+        });
+        expect(sends).toEqual([
+            { type: 'started', taskId: 'task-ipc' },
+            { type: 'delta', taskId: 'task-ipc', delta: 'repeated' },
+            {
+                type: 'completed',
+                task: {
+                    id: 'task-ipc',
+                    status: 'completed',
+                    sourceText: 'repeat repeat repeat',
+                    translatedText: '重复',
+                    targetLanguage: 'zh-CN'
+                }
+            }
+        ]);
+    });
+
+    it('cancels a running selection translation through typed IPC', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const selection: SelectionIpcService = {
+            captureSelectionOnce: vi.fn(async () => ({
+                sourceText: 'selected text',
+                method: 'accessibility' as const,
+                clipboardRestored: true
+            })),
+            translateSelection: vi.fn((options?: {
+                signal?: AbortSignal;
+                taskId?: string;
+                onTaskId?: (taskId: string) => void;
+            }) => new Promise<TranslationTask>((_resolve, reject) => {
+                options?.onTaskId?.(options.taskId ?? 'cancel-task');
+                options?.signal?.addEventListener('abort', () => reject(new Error('cancelled')), {
+                    once: true
+                });
+            }))
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn()
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+        const event = { sender: { send: vi.fn() } };
+        const translationPromise = handlers.get(translationIpcChannels.translateSelection)?.(event, {
+            taskId: 'cancel-task'
+        });
+        await vi.waitFor(() => {
+            expect(selection.translateSelection).toHaveBeenCalledTimes(1);
+        });
+
+        const cancelResult = await handlers.get(translationIpcChannels.cancel)?.(event, {
+            taskId: 'cancel-task'
+        });
+        expect(translationAckSchema.parse(cancelResult)).toEqual({ ok: true });
+
+        await expect(translationPromise).resolves.toEqual({
+            ok: false,
+            error: {
+                code: 'aborted',
+                message: 'Provider request was cancelled.'
+            }
+        });
+    });
+
+    it('keeps selection capture and translation failure paths free of secrets', async () => {
+        const captureAdapter = adapter({
+            readAccessibilitySelection: vi.fn(async () => ''),
+            saveClipboard: vi.fn(async () => ({ items: ['original'] })),
+            readClipboardText: vi.fn(async () => 'selected text'),
+            restoreClipboard: vi.fn(async () => undefined)
+        });
+        const service = new SelectionService({
+            captureAdapter,
+            translationRunner: {
+                run: vi.fn(async () => {
+                    throw new Error(`synthetic ${SYNTHETIC_API_KEY}`);
+                })
+            },
+            getProvider: async () => provider
+        });
+
+        const task = await service.translateSelection();
+
+        expect(task.status).toBe('failed');
+        expect(task.error).toBe('Provider request failed.');
+        expect(JSON.stringify(task)).not.toContain(SYNTHETIC_API_KEY);
+        expect(captureAdapter.restoreClipboard).toHaveBeenCalledTimes(1);
+    });
+});

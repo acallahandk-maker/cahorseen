@@ -188,6 +188,13 @@ export class SecureConfigService {
         return (await this.readState()).providers.map(toProviderSummary);
     }
 
+    async getActiveProviderConfig(): Promise<ProviderConfig> {
+        const state = await this.readState();
+        if (state.activeProviderId === undefined)
+            throw new SecureConfigError('provider-not-found');
+        return this.getProviderForTest(state.activeProviderId);
+    }
+
     async setActiveProvider(providerId: string): Promise<void> {
         const state = await this.readState();
         if (!state.providers.some((provider) => provider.id === providerId))
@@ -369,6 +376,10 @@ export async function setActiveProvider(providerId: string): Promise<void> {
 
 export async function getProviderSummaries(): Promise<ProviderSummary[]> {
     return (await getDefaultService()).getProviderSummaries();
+}
+
+export async function getActiveProviderConfig(): Promise<ProviderConfig> {
+    return (await getDefaultService()).getActiveProviderConfig();
 }
 
 export async function testProvider(

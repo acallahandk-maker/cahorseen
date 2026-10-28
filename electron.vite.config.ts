@@ -9,7 +9,13 @@ export default defineConfig({
     main: {
         build: {
             rollupOptions: {
-                input: resolve(projectRoot, 'src/main/index.ts')
+                input: {
+                    index: resolve(projectRoot, 'src/main/index.ts'),
+                    translationWorker: resolve(
+                        projectRoot,
+                        'src/main/workers/translationWorker.ts'
+                    )
+                }
             }
         }
     },

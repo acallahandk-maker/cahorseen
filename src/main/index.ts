@@ -1,6 +1,10 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpcRouter } from './ipcRouter';
+import {
+    captureSelectionOnce,
+    translateSelection
+} from './services/selectionService';
 import { runSmokeModeIfEnabled } from './smokeMode';
 import {
     getProviderSummaries,
@@ -41,6 +45,10 @@ app.whenReady().then(() => {
             setActiveProvider,
             getProviderSummaries,
             testProvider
+        },
+        selection: {
+            captureSelectionOnce,
+            translateSelection
         }
     });
     const window = createWindow();

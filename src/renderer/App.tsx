@@ -1,5 +1,9 @@
 interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
+    captureSelectionOnce: () => Promise<unknown>;
+    translateSelection: (taskId?: string) => Promise<unknown>;
+    cancelTranslation: (taskId: string) => Promise<void>;
+    onTranslationEvent: (listener: (event: unknown) => void) => () => void;
 }
 
 declare global {

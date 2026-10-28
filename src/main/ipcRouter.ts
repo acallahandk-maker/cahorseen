@@ -6,15 +6,23 @@ import {
     providerErrorCodeSchema,
     providerConfigSchema,
     providerSummarySchema,
+    translationCancelSchema,
+    translationEventSchema,
+    translationIpcChannels,
+    translationStartSchema,
     type ConnectionTestResult,
     type ProviderErrorCode,
     type ProviderConfig,
-    type ProviderSummary
+    type ProviderSummary,
+    type SelectionCapture,
+    type TranslationError,
+    type TranslationTask
 } from '../shared/contracts';
 import {
     providerErrorMessage,
     validateProviderConfig
 } from './services/openAiClient';
+import type { SelectionTranslationOptions } from './services/selectionService';
 
 export const providerIpcChannels = {
     save: 'desktop-pet:provider-save',
@@ -33,6 +41,11 @@ export interface ProviderIpcService {
     ): Promise<ConnectionTestResult>;
 }
 
+export interface SelectionIpcService {
+    captureSelectionOnce(signal?: AbortSignal): Promise<SelectionCapture>;
+    translateSelection(options?: SelectionTranslationOptions): Promise<TranslationTask>;
+}
+
 export interface IpcMainLike {
     handle(channel: string, listener: (event: unknown, payload?: unknown) => unknown): void;
     removeHandler(channel: string): void;
@@ -41,23 +54,24 @@ export interface IpcMainLike {
 export interface RegisterIpcRouterOptions {
     ipcMain: IpcMainLike;
     secureConfig: ProviderIpcService;
+    selection?: SelectionIpcService;
     isSenderAuthorized?: (event: unknown) => boolean;
 }
 
-type ProviderIpcFailure = {
+type IpcFailure = {
     ok: false;
     error: {
-        code: 'unauthorized' | 'invalid-request' | 'request-failed' | ProviderErrorCode;
+        code: 'unauthorized' | 'invalid-request' | 'request-failed' | ProviderErrorCode | TranslationError['code'];
         message: string;
     };
 };
 
-type ProviderIpcSuccess<T> = {
+type IpcSuccess<T> = {
     ok: true;
     value: T;
 };
 
-type ProviderIpcSaveSuccess = {
+type IpcSaveSuccess = {
     ok: true;
 };
 
@@ -69,6 +83,8 @@ const testPayloadSchema = z.strictObject({
 const setActivePayloadSchema = z.strictObject({
     providerId: z.string().min(1)
 });
+
+const emptyPayloadSchema = z.strictObject({});
 
 export function getProductionRendererFileUrl(): string {
     return pathToFileURL(join(__dirname, '../renderer/index.html')).href;
@@ -87,9 +103,9 @@ function defaultIsSenderAuthorized(event: unknown): boolean {
 }
 
 function failure(
-    code: ProviderIpcFailure['error']['code'],
+    code: IpcFailure['error']['code'],
     message: string
-): ProviderIpcFailure {
+): IpcFailure {
     return {
         ok: false,
         error: {
@@ -99,7 +115,7 @@ function failure(
     };
 }
 
-function safeFailure(error: unknown): ProviderIpcFailure {
+function safeFailure(error: unknown): IpcFailure {
     if (error instanceof Error) {
         const code = (error as Error & { code?: unknown }).code;
         const parsedCode = providerErrorCodeSchema.safeParse(code);
@@ -111,9 +127,33 @@ function safeFailure(error: unknown): ProviderIpcFailure {
     return failure('request-failed', 'Provider request failed.');
 }
 
+function safeSelectionFailure(error: unknown): IpcFailure {
+    const code = (error as { code?: unknown }).code;
+    if (code === 'aborted')
+        return failure('aborted', providerErrorMessage('aborted'));
+    if (code === 'empty-selection')
+        return failure('empty-selection', 'No selected text was found.');
+    if (code === 'clipboard-read')
+        return failure('clipboard-read', 'Selected text could not be read.');
+    if (code === 'clipboard-restore')
+        return failure('clipboard-restore', 'The original clipboard could not be restored.');
+    return failure('request-failed', 'Selection capture failed.');
+}
+
+function sendEvent(
+    event: unknown,
+    payload: Parameters<typeof translationEventSchema.parse>[0]
+): void {
+    const sender = (event as {
+        sender?: { send?: (channel: string, payload: unknown) => void };
+    }).sender;
+    sender?.send?.(translationIpcChannels.event, translationEventSchema.parse(payload));
+}
+
 export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void {
-    const { ipcMain, secureConfig } = options;
+    const { ipcMain, secureConfig, selection } = options;
     const isSenderAuthorized = options.isSenderAuthorized ?? defaultIsSenderAuthorized;
+    const activeTasks = new Map<string, AbortController>();
 
     ipcMain.handle(providerIpcChannels.save, async (event, payload) => {
         if (!isSenderAuthorized(event))
@@ -130,7 +170,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             return {
                 ok: true,
                 value: providerSummarySchema.parse(summary)
-            } satisfies ProviderIpcSuccess<ProviderSummary>;
+            } satisfies IpcSuccess<ProviderSummary>;
         } catch (error) {
             return safeFailure(error);
         }
@@ -146,7 +186,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
 
         try {
             await secureConfig.setActiveProvider(parsed.data.providerId);
-            return { ok: true } satisfies ProviderIpcSaveSuccess;
+            return { ok: true } satisfies IpcSaveSuccess;
         } catch (error) {
             return safeFailure(error);
         }
@@ -161,7 +201,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             return {
                 ok: true,
                 value: summaries.map((summary) => providerSummarySchema.parse(summary))
-            } satisfies ProviderIpcSuccess<ProviderSummary[]>;
+            } satisfies IpcSuccess<ProviderSummary[]>;
         } catch (error) {
             return safeFailure(error);
         }
@@ -183,16 +223,111 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             return {
                 ok: true,
                 value: connectionTestResultSchema.parse(result)
-            } satisfies ProviderIpcSuccess<ConnectionTestResult>;
+            } satisfies IpcSuccess<ConnectionTestResult>;
         } catch (error) {
             return safeFailure(error);
         }
     });
+
+    if (selection !== undefined) {
+        ipcMain.handle(translationIpcChannels.captureSelection, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            if (payload !== undefined && !emptyPayloadSchema.safeParse(payload).success)
+                return failure('invalid-request', 'Selection capture request is invalid.');
+
+            try {
+                const capture = await selection.captureSelectionOnce();
+                return {
+                    ok: true,
+                    value: capture
+                } satisfies IpcSuccess<SelectionCapture>;
+            } catch (error) {
+                return safeSelectionFailure(error);
+            }
+        });
+
+        ipcMain.handle(translationIpcChannels.translateSelection, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = translationStartSchema.safeParse(payload ?? {});
+            if (!parsed.success)
+                return failure('invalid-request', 'Selection translation request is invalid.');
+
+            const controller = new AbortController();
+            let taskId = parsed.data.taskId;
+            const onTaskId = (startedTaskId: string): void => {
+                taskId = startedTaskId;
+                activeTasks.set(startedTaskId, controller);
+                sendEvent(event, {
+                    type: 'started',
+                    taskId: startedTaskId
+                });
+            };
+            try {
+                const task = await selection.translateSelection({
+                    taskId: parsed.data.taskId,
+                    signal: controller.signal,
+                    onTaskId,
+                    onDelta: (delta) => {
+                        if (taskId !== undefined) {
+                            sendEvent(event, {
+                                type: 'delta',
+                                taskId,
+                                delta
+                            });
+                        }
+                    }
+                });
+                const aborted = task.error === providerErrorMessage('aborted');
+                if (task.status === 'completed') {
+                    sendEvent(event, { type: 'completed', task });
+                    return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
+                }
+                const error = {
+                    code: aborted ? 'aborted' as const : 'request-failed' as const,
+                    message: task.error ?? 'Provider request failed.'
+                };
+                if (taskId !== undefined)
+                    sendEvent(event, { type: 'failed', taskId, error });
+                return {
+                    ok: false,
+                    error
+                };
+            } catch (error) {
+                if (controller.signal.aborted)
+                    return failure('aborted', providerErrorMessage('aborted'));
+                return safeSelectionFailure(error);
+            } finally {
+                if (taskId !== undefined)
+                    activeTasks.delete(taskId);
+            }
+        });
+
+        ipcMain.handle(translationIpcChannels.cancel, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = translationCancelSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Translation cancellation request is invalid.');
+            const controller = activeTasks.get(parsed.data.taskId);
+            if (controller === undefined)
+                return failure('invalid-request', 'Translation task was not found.');
+            controller.abort();
+            return { ok: true } satisfies IpcSaveSuccess;
+        });
+    }
 
     return () => {
         ipcMain.removeHandler(providerIpcChannels.save);
         ipcMain.removeHandler(providerIpcChannels.setActive);
         ipcMain.removeHandler(providerIpcChannels.summaries);
         ipcMain.removeHandler(providerIpcChannels.test);
+        ipcMain.removeHandler(translationIpcChannels.captureSelection);
+        ipcMain.removeHandler(translationIpcChannels.translateSelection);
+        ipcMain.removeHandler(translationIpcChannels.cancel);
+        for (const controller of activeTasks.values())
+            controller.abort();
+        activeTasks.clear();
     };
 }

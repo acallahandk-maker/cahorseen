@@ -11,6 +11,7 @@ export const MAX_CONTEXT_CHARS = 16_000;
 export const MAX_SYSTEM_PROMPT_CHARS = 4_000;
 export const MAX_TARGET_LANGUAGE_CHARS = 64;
 export const MAX_TRANSLATED_TEXT_CHARS = 16_000;
+export const MAX_TRANSLATION_DELTA_CHARS = 2_000;
 
 function isHttpsUrl(value: string): boolean {
     try {
@@ -165,6 +166,69 @@ export const connectionTestResultSchema = z.discriminatedUnion('success', [
     })
 ]);
 
+export const selectionErrorCodeSchema = z.enum([
+    'empty-selection',
+    'clipboard-read',
+    'clipboard-restore'
+]);
+
+export const translationErrorCodeSchema = z.union([
+    providerErrorCodeSchema,
+    selectionErrorCodeSchema,
+    z.enum(['unauthorized', 'invalid-request', 'request-failed'])
+]);
+
+export const translationErrorSchema = z.strictObject({
+    code: translationErrorCodeSchema,
+    message: z.string().max(500)
+});
+
+export const translationAckSchema = z.union([
+    z.strictObject({
+        ok: z.literal(true)
+    }),
+    z.strictObject({
+        ok: z.literal(false),
+        error: translationErrorSchema
+    })
+]);
+
+export const translationEventSchema = z.discriminatedUnion('type', [
+    z.strictObject({
+        type: z.literal('started'),
+        taskId: nonEmptyString
+    }),
+    z.strictObject({
+        type: z.literal('delta'),
+        taskId: nonEmptyString,
+        delta: z.string().max(MAX_TRANSLATION_DELTA_CHARS)
+    }),
+    z.strictObject({
+        type: z.literal('completed'),
+        task: translationTaskSchema
+    }),
+    z.strictObject({
+        type: z.literal('failed'),
+        taskId: nonEmptyString,
+        error: translationErrorSchema
+    })
+]);
+
+export const translationStartSchema = z.strictObject({
+    taskId: z.string().min(1).max(128).optional()
+});
+
+export const translationCancelSchema = z.strictObject({
+    taskId: z.string().min(1).max(128)
+});
+
+export const translationIpcChannels = {
+    captureSelection: 'desktop-pet:selection-capture',
+    translateSelection: 'desktop-pet:selection-translate',
+    cancel: 'desktop-pet:translation-cancel',
+    event: 'desktop-pet:translation-event'
+} as const;
+
 export const selectionCaptureSchema = z.strictObject({
     sourceText: nonEmptyString,
     method: z.enum(['accessibility', 'clipboard']),
@@ -279,6 +343,10 @@ export type ProviderSummary = z.infer<typeof providerSummarySchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
 export type TranslationStatus = z.infer<typeof translationStatusSchema>;
 export type TranslationTask = z.infer<typeof translationTaskSchema>;
+export type SelectionErrorCode = z.infer<typeof selectionErrorCodeSchema>;
+export type TranslationErrorCode = z.infer<typeof translationErrorCodeSchema>;
+export type TranslationError = z.infer<typeof translationErrorSchema>;
+export type TranslationEvent = z.infer<typeof translationEventSchema>;
 export type MemoryEntry = z.infer<typeof memoryEntrySchema>;
 export type QuizQuestion = z.infer<typeof quizQuestionSchema>;
 export type QuizFeedback = z.infer<typeof quizFeedbackSchema>;
