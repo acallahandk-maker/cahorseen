@@ -24,7 +24,7 @@
 - Render the mascot at 30 FPS normally and at 10 FPS or paused when idle, hidden, obscured, on battery, or in a fullscreen app.
 - Memory target is below 300 MB normally and below 450 MB during screenshots; 8-hour idle growth must stay within 25 MB.
 - Do not retain full screenshots after a task; limit image dimensions and context lengths before sending requests.
-- The product must use an original chubby-fish character and legally licensed Live2D SDK and model assets.
+- The product is for personal, non-commercial use, but it must still use an original chubby-fish character or assets with a clear license permitting that use. Record every third-party asset's source and license in `ASSETS.md`; personal use does not permit arbitrary copying or redistribution.
 
 ## File Structure
 
@@ -56,6 +56,7 @@
 - `tests/integration`: SQLite, IPC, provider, and worker tests.
 - `tests/electron`: packaged-process smoke and core user-flow tests.
 - `tests/electron/fixtures/model`: a tiny test-only licensed or synthetic Live2D fixture.
+- `ASSETS.md`: source, license, attribution, and personal-use status for the Live2D model and visual/audio assets.
 
 ## Review Focus
 
@@ -224,7 +225,7 @@ Using the tiny test fixture, assert model load, mapping for `thinking`, `success
 
 - [ ] **Step 2: Implement Pixi Live2D rendering and performance governor**
 
-Load Cubism assets locally, map state changes to parameter/action layers, cap the default loop at 30 FPS, pause the loop when the window is hidden or suppressed, and fall back to a static mascot when model loading fails.
+Load Cubism assets locally, map state changes to parameter/action layers, cap the default loop at 30 FPS, pause the loop when the window is hidden or suppressed, and fall back to a static mascot when model loading fails. Create `ASSETS.md` with the fixture/model source and license before adding third-party visual assets.
 
 - [ ] **Step 3: Run Live2D smoke and governor tests**
 
@@ -391,7 +392,7 @@ Assert selection translation, screenshot translation, provider errors, memory he
 
 - [ ] **Step 2: Implement release validation and performance profiling**
 
-Measure idle and active CPU, normal/peak private memory, interaction latency, and 8-hour memory drift. Automatically reduce animation resources before falling back to a static mascot. Record model/license verification and dependency/license review in the release checklist.
+Measure idle and active CPU, normal/peak private memory, interaction latency, and 8-hour memory drift. Automatically reduce animation resources before falling back to a static mascot. Record model/license verification and dependency/license review in the release checklist, including the personal-only usage restriction in `ASSETS.md`.
 
 - [ ] **Step 3: Run full verification**
 
