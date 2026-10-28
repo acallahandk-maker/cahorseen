@@ -11,7 +11,10 @@ import {
     type ProviderConfig,
     type ProviderSummary
 } from '../shared/contracts';
-import { validateProviderConfig } from './services/openAiClient';
+import {
+    providerErrorMessage,
+    validateProviderConfig
+} from './services/openAiClient';
 
 export const providerIpcChannels = {
     save: 'desktop-pet:provider-save',
@@ -99,10 +102,11 @@ function failure(
 function safeFailure(error: unknown): ProviderIpcFailure {
     if (error instanceof Error) {
         const code = (error as Error & { code?: unknown }).code;
-        if (providerErrorCodeSchema.safeParse(code).success)
-            return failure(code as ProviderErrorCode, error.message);
+        const parsedCode = providerErrorCodeSchema.safeParse(code);
+        if (parsedCode.success)
+            return failure(parsedCode.data, providerErrorMessage(parsedCode.data));
         if (['SecureConfigError', 'ProviderError'].includes(error.name))
-            return failure('invalid-config', error.message);
+            return failure('invalid-config', providerErrorMessage('invalid-config'));
     }
     return failure('request-failed', 'Provider request failed.');
 }
@@ -117,7 +121,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
 
         const parsed = providerConfigSchema.safeParse(payload);
         if (!parsed.success)
-            return failure('invalid-config', 'Provider configuration is invalid.');
+            return failure('invalid-request', 'Provider configuration is invalid.');
 
         try {
             const summary = await secureConfig.saveProvider(
@@ -138,7 +142,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
 
         const parsed = setActivePayloadSchema.safeParse(payload);
         if (!parsed.success)
-            return failure('invalid-config', 'Provider selection is invalid.');
+            return failure('invalid-request', 'Provider selection is invalid.');
 
         try {
             await secureConfig.setActiveProvider(parsed.data.providerId);
@@ -169,7 +173,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
 
         const parsed = testPayloadSchema.safeParse(payload);
         if (!parsed.success)
-            return failure('invalid-config', 'Provider test request is invalid.');
+            return failure('invalid-request', 'Provider test request is invalid.');
 
         try {
             const result = await secureConfig.testProvider(

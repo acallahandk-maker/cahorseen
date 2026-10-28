@@ -4,6 +4,7 @@ import {
     MAX_SYSTEM_PROMPT_CHARS,
     MAX_TARGET_LANGUAGE_CHARS,
     MAX_TRANSLATED_TEXT_CHARS,
+    MAX_CAPTURED_IMAGE_BYTES,
     capturedImageSchema,
     providerConfigSchema,
     type CapturedImage,
@@ -21,6 +22,7 @@ export {
 export const MIN_PROVIDER_TIMEOUT_MS = 1;
 export const MAX_PROVIDER_TIMEOUT_MS = 120_000;
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
+export const MAX_RAW_RESPONSE_BYTES = 1024 * 1024;
 
 const providerErrorMessages: Record<ProviderErrorCode, string> = {
     'invalid-config': 'Provider configuration is invalid.',
@@ -36,6 +38,10 @@ const providerErrorMessages: Record<ProviderErrorCode, string> = {
     'storage-unavailable': 'Secure storage is unavailable.',
     'storage-error': 'Provider storage could not be updated.'
 };
+
+export function providerErrorMessage(code: ProviderErrorCode): string {
+    return providerErrorMessages[code];
+}
 
 export class ProviderError extends Error {
     readonly code: ProviderErrorCode;
@@ -210,6 +216,7 @@ async function readBodyWithAbort(
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let body = '';
+    let bodyBytes = 0;
     try {
         while (true) {
             const result = await abortable(reader.read(), signal, () => {
@@ -217,6 +224,9 @@ async function readBodyWithAbort(
             });
             if (result.done)
                 break;
+            bodyBytes += result.value.byteLength;
+            if (bodyBytes > MAX_RAW_RESPONSE_BYTES)
+                throw new ProviderError('invalid-response');
             const chunk = decoder.decode(result.value, { stream: true });
             if (onChunk === undefined)
                 body += chunk;
@@ -290,6 +300,25 @@ function parseTranslationResponse(payload: unknown): string {
         throw new ProviderError('invalid-response');
 
     return content;
+}
+
+export function validateCapturedImageRequest(image: CapturedImage): CapturedImage {
+    let parsed: CapturedImage;
+    try {
+        parsed = capturedImageSchema.parse(image);
+    } catch {
+        throw new ProviderError('invalid-config');
+    }
+
+    const prefix = `data:${parsed.mimeType};base64,`;
+    const decodedByteLength = Buffer.from(
+        parsed.dataUrl.slice(prefix.length),
+        'base64'
+    ).byteLength;
+    if (parsed.byteLength > MAX_CAPTURED_IMAGE_BYTES || decodedByteLength > MAX_CAPTURED_IMAGE_BYTES)
+        throw new ProviderError('invalid-config');
+
+    return parsed;
 }
 
 function parseStreamDelta(payload: unknown): string | undefined {
@@ -426,12 +455,7 @@ export class OpenAiClient {
         onDelta?: TranslationDeltaHandler
     ): Promise<TranslationResult> {
         const provider = validateProviderConfig(request.provider);
-        let image: CapturedImage;
-        try {
-            image = capturedImageSchema.parse(request.image);
-        } catch {
-            throw new ProviderError('invalid-config');
-        }
+        const image = validateCapturedImageRequest(request.image);
         const context = requireBoundedValue(request.context, MAX_CONTEXT_CHARS);
         if (request.context !== undefined && context === undefined)
             throw new ProviderError('invalid-config');

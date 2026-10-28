@@ -259,7 +259,7 @@ describe('secure provider configuration', () => {
 
         const invalidResult = await handlers.get(providerIpcChannels.save)?.({}, {
             ...providerConfig('invalid-ipc-provider'),
-            baseUrl: 'file:///tmp/provider'
+            baseUrl: 'https://user:pass@provider.example/v1'
         });
         expect(invalidResult).toEqual({
             ok: false,
@@ -269,6 +269,56 @@ describe('secure provider configuration', () => {
             }
         });
         expect(JSON.stringify(invalidResult).includes(SYNTHETIC_API_KEY)).toBe(false);
+    });
+
+    it('maps malformed IPC request payloads to invalid-request', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const secureConfig = {
+            saveProvider: async () => ({
+                id: 'unused-provider',
+                name: 'Synthetic Provider',
+                baseUrl: 'https://provider.example/v1',
+                hasApiKey: true,
+                textModel: 'synthetic-text-model',
+                visionModel: 'synthetic-vision-model'
+            }),
+            setActiveProvider: async () => undefined,
+            getProviderSummaries: async () => [],
+            testProvider: async () => ({
+                capability: 'text' as const,
+                success: true as const,
+                message: 'Connection test passed.'
+            })
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig,
+            isSenderAuthorized: () => true
+        });
+
+        const saveResult = await handlers.get(providerIpcChannels.save)?.({}, {
+            name: 'missing required provider fields'
+        });
+        const setActiveResult = await handlers.get(providerIpcChannels.setActive)?.({}, {});
+        const testResult = await handlers.get(providerIpcChannels.test)?.({}, {
+            providerId: 'unused-provider',
+            capability: 'invalid-capability'
+        });
+
+        for (const result of [saveResult, setActiveResult, testResult]) {
+            expect(result).toMatchObject({
+                ok: false,
+                error: { code: 'invalid-request' }
+            });
+        }
     });
 
     it('propagates sanitized typed failures through IPC', async () => {
@@ -323,6 +373,49 @@ describe('secure provider configuration', () => {
             }
         });
         expect(JSON.stringify(saveResult).includes(SYNTHETIC_API_KEY)).toBe(false);
+    });
+
+    it('does not forward arbitrary internal messages with provider-shaped codes', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const secureConfig = {
+            saveProvider: async () => {
+                throw Object.assign(
+                    new Error(`internal detail ${SYNTHETIC_API_KEY}`),
+                    { code: 'storage-error' }
+                );
+            },
+            setActiveProvider: async () => undefined,
+            getProviderSummaries: async () => [],
+            testProvider: async () => ({
+                capability: 'text' as const,
+                success: true as const,
+                message: 'Connection test passed.'
+            })
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig,
+            isSenderAuthorized: () => true
+        });
+
+        const result = await handlers.get(providerIpcChannels.save)?.({}, providerConfig('privacy-provider'));
+        expect(result).toEqual({
+            ok: false,
+            error: {
+                code: 'storage-error',
+                message: 'Provider storage could not be updated.'
+            }
+        });
+        expect(JSON.stringify(result).includes(SYNTHETIC_API_KEY)).toBe(false);
+        expect(JSON.stringify(result).includes('internal detail')).toBe(false);
     });
 
     it('authorizes only the production renderer URL and exact configured renderer URL', async () => {

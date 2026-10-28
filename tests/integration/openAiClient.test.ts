@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
     OpenAiClient,
-    ProviderError
+    ProviderError,
+    validateCapturedImageRequest
 } from '../../src/main/services/openAiClient';
-import type { ProviderConfig } from '../../src/shared/contracts';
+import {
+    MAX_CAPTURED_IMAGE_BYTES,
+    type CapturedImage,
+    type ProviderConfig
+} from '../../src/shared/contracts';
 
 const SYNTHETIC_API_KEY = 'sk-synthetic-test-only-123';
 const provider: ProviderConfig = {
@@ -71,6 +76,16 @@ function sseResponse(events: unknown[]) {
         status: 200,
         headers: { 'content-type': 'text/event-stream' }
     });
+}
+
+function capturedImageOfSize(byteLength: number): CapturedImage {
+    return {
+        dataUrl: `data:image/png;base64,${Buffer.alloc(byteLength).toString('base64')}`,
+        mimeType: 'image/png',
+        width: 1,
+        height: 1,
+        byteLength
+    };
 }
 
 describe('OpenAI-compatible translation client', () => {
@@ -503,5 +518,77 @@ describe('OpenAI-compatible translation client', () => {
             expect((error as ProviderError).code).toBe('invalid-config');
             expect(String(error).includes('AAAA')).toBe(false);
         }
+    });
+
+    it('accepts captured images at the 8 MiB request boundary', async () => {
+        let requestStarted = false;
+        const client = new OpenAiClient({
+            fetchImpl: async () => {
+                requestStarted = true;
+                return jsonResponse({
+                    choices: [{ message: { content: 'ok' } }]
+                });
+            }
+        });
+        const boundaryImage = capturedImageOfSize(MAX_CAPTURED_IMAGE_BYTES);
+
+        expect(() => validateCapturedImageRequest(boundaryImage)).not.toThrow();
+        await expect(client.translateImage({
+            provider,
+            image: boundaryImage,
+            targetLanguage: 'en'
+        })).resolves.toMatchObject({ translatedText: 'ok' });
+        expect(requestStarted).toBe(true);
+    });
+
+    it('rejects captured images just over 8 MiB before starting a request', async () => {
+        let requestStarted = false;
+        const client = new OpenAiClient({
+            fetchImpl: async () => {
+                requestStarted = true;
+                return jsonResponse({
+                    choices: [{ message: { content: 'must not be reached' } }]
+                });
+            }
+        });
+        const oversizedImage = capturedImageOfSize(MAX_CAPTURED_IMAGE_BYTES + 1);
+
+        expect(() => validateCapturedImageRequest(oversizedImage)).toThrow(ProviderError);
+        await expect(client.translateImage({
+            provider,
+            image: oversizedImage,
+            targetLanguage: 'en'
+        })).rejects.toMatchObject({ code: 'invalid-config' });
+        expect(requestStarted).toBe(false);
+    });
+
+    it('rejects delayed non-stream response bodies over 1 MiB before JSON parsing', async () => {
+        const encoder = new TextEncoder();
+        const oversizedBody = encoder.encode(
+            `${' '.repeat(1_048_577)}${JSON.stringify({
+                choices: [{ message: { content: 'must not be reached' } }]
+            })}`
+        );
+        const client = new OpenAiClient({
+            fetchImpl: async () => new Promise((resolve) => {
+                setTimeout(() => {
+                    resolve(new Response(new ReadableStream<Uint8Array>({
+                        start(controller) {
+                            controller.enqueue(oversizedBody);
+                            controller.close();
+                        }
+                    }), {
+                        status: 200,
+                        headers: { 'content-type': 'application/json' }
+                    }));
+                }, 20);
+            })
+        });
+
+        await expect(client.translateText({
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'invalid-response' });
     });
 });
