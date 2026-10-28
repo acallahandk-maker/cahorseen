@@ -12,6 +12,7 @@ import {
     MAX_TARGET_LANGUAGE_CHARS,
     MAX_TRANSLATED_TEXT_CHARS,
     MAX_TRANSLATION_DELTA_CHARS,
+    capturedImageSchema,
     providerConfigSchema,
     translationErrorCodeSchema,
     type ProviderErrorCode
@@ -19,14 +20,24 @@ import {
 import {
     OpenAiClient,
     ProviderError,
+    UnsupportedVisionError,
     providerErrorMessage,
+    type ImageTranslationRequest,
     type TextTranslationRequest,
     type TranslationDeltaHandler,
     type TranslationResult
 } from '../services/openAiClient';
 
+export { UnsupportedVisionError };
+
 export interface TranslationRunnerRequest extends TextTranslationRequest {
     taskId: string;
+    kind?: 'text';
+}
+
+export interface ImageTranslationRunnerRequest extends ImageTranslationRequest {
+    taskId: string;
+    kind: 'image';
 }
 
 export interface TranslationRunner {
@@ -37,15 +48,33 @@ export interface TranslationRunner {
     ): Promise<TranslationResult>;
 }
 
+export interface ImageTranslationRunner {
+    runImage(
+        request: ImageTranslationRunnerRequest,
+        signal?: AbortSignal,
+        onDelta?: TranslationDeltaHandler
+    ): Promise<TranslationResult>;
+}
+
 export interface TranslationWorkerRunnerOptions {
     workerPath: string;
     workerFactory?: (filename: string, options: WorkerOptions) => Worker;
 }
 
-const translationRunnerRequestSchema = z.strictObject({
+const textTranslationRunnerRequestSchema = z.strictObject({
     taskId: z.string().min(1).max(128),
+    kind: z.literal('text').optional(),
     provider: providerConfigSchema,
     sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS),
+    context: z.string().max(MAX_CONTEXT_CHARS).optional(),
+    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS)
+});
+
+const imageTranslationRunnerRequestSchema = z.strictObject({
+    taskId: z.string().min(1).max(128),
+    kind: z.literal('image'),
+    provider: providerConfigSchema,
+    image: capturedImageSchema,
     context: z.string().max(MAX_CONTEXT_CHARS).optional(),
     targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS)
 });
@@ -71,6 +100,7 @@ const workerMessageSchema = z.discriminatedUnion('type', [
 ]);
 
 type WorkerMessage = z.infer<typeof workerMessageSchema>;
+type WorkerFailureCode = ProviderErrorCode | 'unsupported-vision';
 
 export function createDeltaEmitter(
     post: (delta: string) => void
@@ -98,7 +128,9 @@ function toProviderErrorCode(code: z.infer<typeof translationErrorCodeSchema>): 
         : 'network';
 }
 
-function safeFailureCode(error: unknown): ProviderErrorCode {
+function safeFailureCode(error: unknown): WorkerFailureCode {
+    if (error instanceof UnsupportedVisionError)
+        return error.code;
     if (error instanceof ProviderError)
         return error.code;
     return 'network';
@@ -106,20 +138,37 @@ function safeFailureCode(error: unknown): ProviderErrorCode {
 
 function safeFailure(error: unknown, taskId: string): WorkerMessage {
     const code = safeFailureCode(error);
+    const message = code === 'unsupported-vision'
+        ? new UnsupportedVisionError().message
+        : providerErrorMessage(code);
     return {
         type: 'failed',
         taskId,
         code,
-        message: providerErrorMessage(code)
+        message
     };
 }
 
-async function runWorker(request: TranslationRunnerRequest): Promise<void> {
-    const parsed = translationRunnerRequestSchema.safeParse(request);
+function runnerError(code: z.infer<typeof translationErrorCodeSchema>): Error {
+    return code === 'unsupported-vision'
+        ? new UnsupportedVisionError()
+        : new ProviderError(toProviderErrorCode(code));
+}
+
+type RunnerRequest = TranslationRunnerRequest | ImageTranslationRunnerRequest;
+
+async function runWorker(request: RunnerRequest): Promise<void> {
+    const isImageRequest = (request as { kind?: unknown }).kind === 'image';
+    const parsed = isImageRequest
+        ? imageTranslationRunnerRequestSchema.safeParse(request)
+        : textTranslationRunnerRequestSchema.safeParse(request);
     if (!parsed.success || parentPort === null) {
+        const taskId = typeof (request as { taskId?: unknown })?.taskId === 'string'
+            ? (request as { taskId: string }).taskId
+            : '';
         parentPort?.postMessage({
             type: 'failed',
-            taskId: request?.taskId ?? '',
+            taskId,
             code: 'invalid-config',
             message: providerErrorMessage('invalid-config')
         } satisfies WorkerMessage);
@@ -134,16 +183,20 @@ async function runWorker(request: TranslationRunnerRequest): Promise<void> {
                 delta
             } satisfies WorkerMessage);
         });
-        const result = await new OpenAiClient().translateText(
-            {
+        const client = new OpenAiClient();
+        const result = parsed.data.kind === 'image'
+            ? await client.translateImage({
+                provider: parsed.data.provider,
+                image: parsed.data.image,
+                context: parsed.data.context,
+                targetLanguage: parsed.data.targetLanguage
+            }, undefined, emitDelta)
+            : await client.translateText({
                 provider: parsed.data.provider,
                 sourceText: parsed.data.sourceText,
                 context: parsed.data.context,
                 targetLanguage: parsed.data.targetLanguage
-            },
-            undefined,
-            emitDelta
-        );
+            }, undefined, emitDelta);
         parentPort.postMessage({
             type: 'completed',
             taskId: parsed.data.taskId,
@@ -155,7 +208,7 @@ async function runWorker(request: TranslationRunnerRequest): Promise<void> {
     }
 }
 
-export class TranslationWorkerRunner implements TranslationRunner {
+export class TranslationWorkerRunner implements TranslationRunner, ImageTranslationRunner {
     private readonly workerPath: string;
     private readonly workerFactory: (filename: string, options: WorkerOptions) => Worker;
 
@@ -172,7 +225,29 @@ export class TranslationWorkerRunner implements TranslationRunner {
         signal?: AbortSignal,
         onDelta?: TranslationDeltaHandler
     ): Promise<TranslationResult> {
-        const parsed = translationRunnerRequestSchema.safeParse(request);
+        return this.runRequest(request, textTranslationRunnerRequestSchema, signal, onDelta);
+    }
+
+    runImage(
+        request: ImageTranslationRunnerRequest,
+        signal?: AbortSignal,
+        onDelta?: TranslationDeltaHandler
+    ): Promise<TranslationResult> {
+        return this.runRequest(
+            request,
+            imageTranslationRunnerRequestSchema,
+            signal,
+            onDelta
+        );
+    }
+
+    private runRequest<TRequest extends RunnerRequest>(
+        request: TRequest,
+        requestSchema: z.ZodType<TRequest>,
+        signal?: AbortSignal,
+        onDelta?: TranslationDeltaHandler
+    ): Promise<TranslationResult> {
+        const parsed = requestSchema.safeParse(request);
         if (!parsed.success)
             return Promise.reject(new ProviderError('invalid-config'));
         if (signal?.aborted === true)
@@ -201,6 +276,8 @@ export class TranslationWorkerRunner implements TranslationRunner {
 
             signal?.addEventListener('abort', abort, { once: true });
             worker.on('message', (raw: unknown) => {
+                if (settled)
+                    return;
                 const parsedMessage = workerMessageSchema.safeParse(raw);
                 if (!parsedMessage.success || parsedMessage.data.taskId !== parsed.data.taskId) {
                     finish(() => {
@@ -227,7 +304,7 @@ export class TranslationWorkerRunner implements TranslationRunner {
                 }
                 finish(() => {
                     void worker.terminate();
-                    reject(new ProviderError(toProviderErrorCode(message.code)));
+                    reject(runnerError(message.code));
                 });
             });
             worker.once('error', () => {
@@ -248,4 +325,4 @@ export class TranslationWorkerRunner implements TranslationRunner {
 }
 
 if (!isMainThread && parentPort !== null)
-    void runWorker(workerData as TranslationRunnerRequest);
+    void runWorker(workerData as RunnerRequest);

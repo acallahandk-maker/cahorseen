@@ -62,6 +62,15 @@ export class ProviderError extends Error {
     }
 }
 
+export class UnsupportedVisionError extends Error {
+    readonly code = 'unsupported-vision';
+
+    constructor() {
+        super('Vision translation is not supported. Choose a vision-capable model.');
+        this.name = 'UnsupportedVisionError';
+    }
+}
+
 export interface TextTranslationRequest {
     provider: ProviderConfig;
     sourceText: string;
@@ -266,7 +275,7 @@ async function withRequestSignal<T>(
     try {
         return await operation(controller.signal);
     } catch (error) {
-        if (error instanceof ProviderError)
+        if (error instanceof ProviderError || error instanceof UnsupportedVisionError)
             throw error;
         if (timedOut)
             throw new ProviderError('timeout');
@@ -448,7 +457,7 @@ export class OpenAiClient {
         if (provider.systemPrompt !== undefined)
             messages.unshift({ role: 'system', content: provider.systemPrompt });
 
-        return this.requestTranslation(provider, messages, signal, onDelta);
+        return this.requestTranslation(provider, messages, signal, onDelta, 'text');
     }
 
     async translateImage(
@@ -489,14 +498,15 @@ export class OpenAiClient {
         if (provider.systemPrompt !== undefined)
             messages.unshift({ role: 'system', content: provider.systemPrompt });
 
-        return this.requestTranslation(provider, messages, signal, onDelta);
+        return this.requestTranslation(provider, messages, signal, onDelta, 'vision');
     }
 
     private async requestTranslation(
         provider: ProviderConfig,
         messages: ChatCompletionBody['messages'],
         signal: AbortSignal | undefined,
-        onDelta?: TranslationDeltaHandler
+        onDelta?: TranslationDeltaHandler,
+        capability: 'text' | 'vision' = 'text'
     ): Promise<TranslationResult> {
         const body: ChatCompletionBody = {
             model: '',
@@ -527,6 +537,11 @@ export class OpenAiClient {
                     }
                 );
 
+                if (
+                    capability === 'vision'
+                    && (response.status === 400 || response.status === 404)
+                )
+                    throw new UnsupportedVisionError();
                 if (!response.ok)
                     throw new ProviderError(errorForStatus(response.status));
 

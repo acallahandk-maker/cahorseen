@@ -102,6 +102,8 @@ function safeTaskError(error: unknown): string {
     const code = safeTaskErrorCode(error);
     if (code === 'request-failed')
         return 'Provider request failed.';
+    if (code === 'unsupported-vision')
+        return 'Vision translation is not supported. Choose a vision-capable model.';
     if (code === 'empty-selection')
         return 'No selected text was found.';
     if (code === 'clipboard-read')

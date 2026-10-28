@@ -167,7 +167,12 @@ export const selectionErrorCodeSchema = z.enum([
 export const translationErrorCodeSchema = z.union([
     providerErrorCodeSchema,
     selectionErrorCodeSchema,
-    z.enum(['unauthorized', 'invalid-request', 'request-failed'])
+    z.enum([
+        'unauthorized',
+        'invalid-request',
+        'request-failed',
+        'unsupported-vision'
+    ])
 ]);
 
 export const translationErrorSchema = z.strictObject({

@@ -25,9 +25,11 @@ export default function TranslationBubble({
                 <span>{task.targetLanguage}</span>
                 <span>{task.status}</span>
             </header>
-            <p>{task.sourceText}</p>
+            <p aria-label="Translation source">{task.sourceText}</p>
             <output>{translation}</output>
-            {task.error === undefined ? null : <p role="alert">{task.error}</p>}
+            {task.error === undefined ? null : (
+                <p role="alert" data-error-code={task.errorCode}>{task.error}</p>
+            )}
             <footer>
                 <button type="button" onClick={onCopy}>Copy</button>
                 <button type="button" onClick={onRetry}>Retry</button>
