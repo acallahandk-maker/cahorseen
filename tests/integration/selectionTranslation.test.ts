@@ -16,12 +16,15 @@ import {
 } from '../../src/main/ipcRouter';
 import {
     TranslationWorkerRunner,
+    createDeltaEmitter,
     type TranslationRunnerRequest
 } from '../../src/main/workers/translationWorker';
 import {
+    SelectionError,
     SelectionService,
     type SelectionCaptureAdapter
 } from '../../src/main/services/selectionService';
+import { registerSelectionShortcut } from '../../src/main/selectionShortcut';
 
 const SYNTHETIC_API_KEY = 'synthetic-api-key-never-logged';
 const provider: ProviderConfig = {
@@ -166,6 +169,169 @@ describe('selection translation integration', () => {
         expect(selection.captureSelectionOnce).not.toHaveBeenCalled();
     });
 
+    it('chunks oversized deltas before posting worker messages', () => {
+        const messages: string[] = [];
+        const emitDelta = createDeltaEmitter((delta) => {
+            messages.push(delta);
+        });
+
+        emitDelta('a'.repeat(4_501));
+
+        expect(messages).toHaveLength(3);
+        expect(messages.every((delta) => delta.length <= 2_000)).toBe(true);
+        expect(messages.join('')).toBe('a'.repeat(4_501));
+    });
+
+    it('emits terminal failure events after capture starts', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const sends: unknown[] = [];
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const selection = {
+            captureSelectionOnce: vi.fn(),
+            translateSelection: vi.fn(async (options?: {
+                signal?: AbortSignal;
+                taskId?: string;
+                onTaskId?: (taskId: string) => void;
+            }): Promise<TranslationTask> => {
+                options?.onTaskId?.(options.taskId ?? 'terminal-failure-task');
+                throw new SelectionError('clipboard-restore');
+            })
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn()
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+        const event = {
+            sender: {
+                send: (_channel: string, payload: unknown) => {
+                    sends.push(payload);
+                }
+            }
+        };
+
+        const result = await handlers.get(translationIpcChannels.translateSelection)?.(event, {});
+
+        expect(result).toEqual({
+            ok: false,
+            error: {
+                code: 'clipboard-restore',
+                message: 'The original clipboard could not be restored.'
+            }
+        });
+        const startedTaskId = (sends[0] as { taskId: string }).taskId;
+        expect(sends).toEqual([
+            { type: 'started', taskId: startedTaskId },
+            {
+                type: 'failed',
+                taskId: startedTaskId,
+                error: {
+                    code: 'clipboard-restore',
+                    message: 'The original clipboard could not be restored.'
+                }
+            }
+        ]);
+    });
+
+    it('generates distinct main-process task IDs for concurrent starts', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const sends: unknown[] = [];
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const selection = {
+            captureSelectionOnce: vi.fn(),
+            translateSelection: vi.fn(async (options?: {
+                signal?: AbortSignal;
+                taskId?: string;
+                onTaskId?: (taskId: string) => void;
+                onDelta?: (delta: string) => void;
+            }): Promise<TranslationTask> => {
+                const taskId = options?.taskId ?? 'renderer-collision';
+                options?.onTaskId?.(taskId);
+                return {
+                    id: taskId,
+                    status: 'completed',
+                    sourceText: 'selected text',
+                    translatedText: 'ok',
+                    targetLanguage: 'zh-CN'
+                };
+            })
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn()
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+        const event = {
+            sender: {
+                send: (_channel: string, payload: unknown) => {
+                    sends.push(payload);
+                }
+            }
+        };
+
+        await Promise.all([
+            handlers.get(translationIpcChannels.translateSelection)?.(event, {}),
+            handlers.get(translationIpcChannels.translateSelection)?.(event, {})
+        ]);
+
+        const startedIds = sends
+            .filter((payload): payload is { type: 'started'; taskId: string } => (
+                typeof payload === 'object'
+                && payload !== null
+                && (payload as { type?: unknown }).type === 'started'
+            ))
+            .map((payload) => payload.taskId);
+        expect(startedIds).toHaveLength(2);
+        expect(new Set(startedIds).size).toBe(2);
+    });
+
+    it('registers and disposes the explicit selection shortcut', () => {
+        const listeners = new Map<string, () => void>();
+        const shortcut = {
+            register: vi.fn((accelerator: string, listener: () => void) => {
+                listeners.set(accelerator, listener);
+                return true;
+            }),
+            unregister: vi.fn((accelerator: string) => {
+                listeners.delete(accelerator);
+            })
+        };
+        const onTrigger = vi.fn();
+
+        const dispose = registerSelectionShortcut({ shortcut, onTrigger });
+        listeners.get('CommandOrControl+Shift+T')?.();
+        dispose();
+
+        expect(onTrigger).toHaveBeenCalledTimes(1);
+        expect(shortcut.unregister).toHaveBeenCalledWith('CommandOrControl+Shift+T');
+    });
+
     it('streams typed IPC events and records repeated source text once in one task', async () => {
         const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
         const sends: unknown[] = [];
@@ -221,15 +387,19 @@ describe('selection translation integration', () => {
             }
         };
 
-        const result = await handlers.get(translationIpcChannels.translateSelection)?.(event, {
-            taskId: 'task-ipc'
-        });
+        const result = await handlers.get(translationIpcChannels.translateSelection)?.(event, {});
+        const startedEvent = sends.find((payload) => (
+            typeof payload === 'object'
+            && payload !== null
+            && (payload as { type?: unknown }).type === 'started'
+        )) as { taskId: string };
+        const taskId = startedEvent.taskId;
 
         expect(selection.translateSelection).toHaveBeenCalledTimes(1);
         expect(result).toEqual({
             ok: true,
             value: {
-                id: 'task-ipc',
+                id: taskId,
                 status: 'completed',
                 sourceText: 'repeat repeat repeat',
                 translatedText: '重复',
@@ -237,12 +407,12 @@ describe('selection translation integration', () => {
             }
         });
         expect(sends).toEqual([
-            { type: 'started', taskId: 'task-ipc' },
-            { type: 'delta', taskId: 'task-ipc', delta: 'repeated' },
+            { type: 'started', taskId },
+            { type: 'delta', taskId, delta: 'repeated' },
             {
                 type: 'completed',
                 task: {
-                    id: 'task-ipc',
+                    id: taskId,
                     status: 'completed',
                     sourceText: 'repeat repeat repeat',
                     translatedText: '重复',
@@ -290,16 +460,26 @@ describe('selection translation integration', () => {
             selection,
             isSenderAuthorized: () => true
         });
-        const event = { sender: { send: vi.fn() } };
-        const translationPromise = handlers.get(translationIpcChannels.translateSelection)?.(event, {
-            taskId: 'cancel-task'
-        });
+        const sends: unknown[] = [];
+        const event = {
+            sender: {
+                send: (_channel: string, payload: unknown) => {
+                    sends.push(payload);
+                }
+            }
+        };
+        const translationPromise = handlers.get(translationIpcChannels.translateSelection)?.(event, {});
         await vi.waitFor(() => {
             expect(selection.translateSelection).toHaveBeenCalledTimes(1);
         });
+        const startedEvent = sends.find((payload) => (
+            typeof payload === 'object'
+            && payload !== null
+            && (payload as { type?: unknown }).type === 'started'
+        )) as { taskId: string };
 
         const cancelResult = await handlers.get(translationIpcChannels.cancel)?.(event, {
-            taskId: 'cancel-task'
+            taskId: startedEvent.taskId
         });
         expect(translationAckSchema.parse(cancelResult)).toEqual({ ok: true });
 
@@ -310,6 +490,20 @@ describe('selection translation integration', () => {
                 message: 'Provider request was cancelled.'
             }
         });
+        expect(sends).toEqual([
+            {
+                type: 'started',
+                taskId: startedEvent.taskId
+            },
+            {
+                type: 'failed',
+                taskId: startedEvent.taskId,
+                error: {
+                    code: 'aborted',
+                    message: 'Provider request was cancelled.'
+                }
+            }
+        ]);
     });
 
     it('keeps selection capture and translation failure paths free of secrets', async () => {

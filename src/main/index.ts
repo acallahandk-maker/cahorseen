@@ -1,10 +1,11 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpcRouter } from './ipcRouter';
 import {
     captureSelectionOnce,
     translateSelection
 } from './services/selectionService';
+import { registerSelectionShortcut } from './selectionShortcut';
 import { runSmokeModeIfEnabled } from './smokeMode';
 import {
     getProviderSummaries,
@@ -12,6 +13,7 @@ import {
     setActiveProvider,
     testProvider
 } from './services/secureConfig';
+import { translationIpcChannels } from '../shared/contracts';
 
 const pingChannel = 'desktop-pet:ping';
 
@@ -51,6 +53,14 @@ app.whenReady().then(() => {
             translateSelection
         }
     });
+    const disposeSelectionShortcut = registerSelectionShortcut({
+        shortcut: globalShortcut,
+        onTrigger: () => {
+            for (const window of BrowserWindow.getAllWindows())
+                window.webContents.send(translationIpcChannels.selectionShortcut);
+        }
+    });
+    app.on('will-quit', disposeSelectionShortcut);
     const window = createWindow();
     if (runSmokeModeIfEnabled(window))
         return;

@@ -34,9 +34,10 @@ function successSchema<T>(value: z.ZodType<T>) {
 export interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
     captureSelectionOnce: () => Promise<SelectionCapture>;
-    translateSelection: (taskId?: string) => Promise<TranslationTask>;
+    translateSelection: () => Promise<TranslationTask>;
     cancelTranslation: (taskId: string) => Promise<void>;
     onTranslationEvent: (listener: (event: TranslationEvent) => void) => () => void;
+    onSelectionShortcut: (listener: () => void) => () => void;
 }
 
 function parseResult<T>(
@@ -62,8 +63,8 @@ const desktopPetApi: DesktopPetApi = {
         selectionCaptureSchema,
         await ipcRenderer.invoke(translationIpcChannels.captureSelection)
     ),
-    translateSelection: async (taskId) => {
-        const request = translationStartSchema.parse({ taskId });
+    translateSelection: async () => {
+        const request = translationStartSchema.parse({});
         return parseResult(
             translationTaskSchema,
             await ipcRenderer.invoke(translationIpcChannels.translateSelection, request)
@@ -80,6 +81,18 @@ const desktopPetApi: DesktopPetApi = {
         ipcRenderer.on(translationIpcChannels.event, channelListener);
         return () => {
             ipcRenderer.removeListener(translationIpcChannels.event, channelListener);
+        };
+    },
+    onSelectionShortcut: (listener) => {
+        const channelListener = (): void => {
+            listener();
+        };
+        ipcRenderer.on(translationIpcChannels.selectionShortcut, channelListener);
+        return () => {
+            ipcRenderer.removeListener(
+                translationIpcChannels.selectionShortcut,
+                channelListener
+            );
         };
     }
 };

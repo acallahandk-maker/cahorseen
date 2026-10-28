@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
@@ -19,6 +20,7 @@ import {
     type TranslationTask
 } from '../shared/contracts';
 import {
+    ProviderError,
     providerErrorMessage,
     validateProviderConfig
 } from './services/openAiClient';
@@ -128,6 +130,8 @@ function safeFailure(error: unknown): IpcFailure {
 }
 
 function safeSelectionFailure(error: unknown): IpcFailure {
+    if (error instanceof ProviderError)
+        return safeFailure(error);
     const code = (error as { code?: unknown }).code;
     if (code === 'aborted')
         return failure('aborted', providerErrorMessage('aborted'));
@@ -137,6 +141,8 @@ function safeSelectionFailure(error: unknown): IpcFailure {
         return failure('clipboard-read', 'Selected text could not be read.');
     if (code === 'clipboard-restore')
         return failure('clipboard-restore', 'The original clipboard could not be restored.');
+    if (code === 'invalid-selection')
+        return failure('invalid-selection', 'Selected text is too large.');
     return failure('request-failed', 'Selection capture failed.');
 }
 
@@ -148,6 +154,13 @@ function sendEvent(
         sender?: { send?: (channel: string, payload: unknown) => void };
     }).sender;
     sender?.send?.(translationIpcChannels.event, translationEventSchema.parse(payload));
+}
+
+function taskFailure(task: TranslationTask): IpcFailure['error'] {
+    return {
+        code: task.errorCode ?? 'request-failed',
+        message: task.error ?? 'Provider request failed.'
+    };
 }
 
 export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void {
@@ -255,18 +268,19 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 return failure('invalid-request', 'Selection translation request is invalid.');
 
             const controller = new AbortController();
-            let taskId = parsed.data.taskId;
+            const taskId = randomUUID();
+            activeTasks.set(taskId, controller);
             const onTaskId = (startedTaskId: string): void => {
-                taskId = startedTaskId;
-                activeTasks.set(startedTaskId, controller);
+                if (startedTaskId !== taskId)
+                    return;
                 sendEvent(event, {
                     type: 'started',
-                    taskId: startedTaskId
+                    taskId
                 });
             };
             try {
                 const task = await selection.translateSelection({
-                    taskId: parsed.data.taskId,
+                    taskId,
                     signal: controller.signal,
                     onTaskId,
                     onDelta: (delta) => {
@@ -279,28 +293,28 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                         }
                     }
                 });
-                const aborted = task.error === providerErrorMessage('aborted');
                 if (task.status === 'completed') {
                     sendEvent(event, { type: 'completed', task });
                     return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
                 }
-                const error = {
-                    code: aborted ? 'aborted' as const : 'request-failed' as const,
-                    message: task.error ?? 'Provider request failed.'
-                };
-                if (taskId !== undefined)
-                    sendEvent(event, { type: 'failed', taskId, error });
+                const error = taskFailure(task);
+                sendEvent(event, { type: 'failed', taskId, error });
                 return {
                     ok: false,
                     error
                 };
             } catch (error) {
-                if (controller.signal.aborted)
-                    return failure('aborted', providerErrorMessage('aborted'));
-                return safeSelectionFailure(error);
+                const result = controller.signal.aborted
+                    ? failure('aborted', providerErrorMessage('aborted'))
+                    : safeSelectionFailure(error);
+                sendEvent(event, {
+                    type: 'failed',
+                    taskId,
+                    error: result.error
+                });
+                return result;
             } finally {
-                if (taskId !== undefined)
-                    activeTasks.delete(taskId);
+                activeTasks.delete(taskId);
             }
         });
 

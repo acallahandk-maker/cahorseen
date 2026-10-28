@@ -72,6 +72,15 @@ const workerMessageSchema = z.discriminatedUnion('type', [
 
 type WorkerMessage = z.infer<typeof workerMessageSchema>;
 
+export function createDeltaEmitter(
+    post: (delta: string) => void
+): (delta: string) => void {
+    return (delta) => {
+        for (let offset = 0; offset < delta.length; offset += MAX_TRANSLATION_DELTA_CHARS)
+            post(delta.slice(offset, offset + MAX_TRANSLATION_DELTA_CHARS));
+    };
+}
+
 function toProviderErrorCode(code: z.infer<typeof translationErrorCodeSchema>): ProviderErrorCode {
     return code === 'aborted'
         || code === 'authentication'
@@ -118,6 +127,13 @@ async function runWorker(request: TranslationRunnerRequest): Promise<void> {
     }
 
     try {
+        const emitDelta = createDeltaEmitter((delta) => {
+            parentPort?.postMessage({
+                type: 'delta',
+                taskId: parsed.data.taskId,
+                delta
+            } satisfies WorkerMessage);
+        });
         const result = await new OpenAiClient().translateText(
             {
                 provider: parsed.data.provider,
@@ -126,13 +142,7 @@ async function runWorker(request: TranslationRunnerRequest): Promise<void> {
                 targetLanguage: parsed.data.targetLanguage
             },
             undefined,
-            (delta) => {
-                parentPort?.postMessage({
-                    type: 'delta',
-                    taskId: parsed.data.taskId,
-                    delta
-                } satisfies WorkerMessage);
-            }
+            emitDelta
         );
         parentPort.postMessage({
             type: 'completed',

@@ -4,7 +4,12 @@ import {
     type SelectionCaptureAdapter,
     type TranslationRunner
 } from '../../src/main/services/selectionService';
+import {
+    translationBubbleReducer,
+    type TranslationBubbleState
+} from '../../src/renderer/translation/translationState';
 import type { ProviderConfig, TranslationTask } from '../../src/shared/contracts';
+import { ProviderError } from '../../src/main/services/openAiClient';
 
 const provider: ProviderConfig = {
     id: 'synthetic-provider',
@@ -162,7 +167,8 @@ describe('selectionService', () => {
             sourceText: 'selected text',
             translatedText: '',
             targetLanguage: 'zh-CN',
-            error: 'Provider request failed.'
+            error: 'Provider request failed.',
+            errorCode: 'request-failed'
         });
         expect(captureAdapter.restoreClipboard).toHaveBeenCalledWith(snapshot);
         expect(JSON.stringify(result)).not.toContain(provider.apiKey);
@@ -189,9 +195,57 @@ describe('selectionService', () => {
             sourceText: 'selected text',
             translatedText: '',
             targetLanguage: 'und',
-            error: 'Provider configuration is invalid.'
+            error: 'Provider configuration is invalid.',
+            errorCode: 'invalid-config'
         });
         expect(translationRunner.run).not.toHaveBeenCalled();
+    });
+
+    it('preserves provider error codes on failed translation tasks', async () => {
+        const captureAdapter = adapter();
+        const translationRunner: TranslationRunner = {
+            run: vi.fn(async () => {
+                throw new ProviderError('rate-limited');
+            })
+        };
+
+        const result = await service(captureAdapter, translationRunner).translateSelection();
+
+        expect(result.errorCode).toBe('rate-limited');
+        expect(result.error).toBe('Provider rate limit exceeded.');
+    });
+
+    it('reduces typed lifecycle events into bubble state', () => {
+        const initial: TranslationBubbleState = {
+            task: {
+                id: 'task-bubble',
+                status: 'running',
+                sourceText: 'Capturing selected text',
+                translatedText: '',
+                targetLanguage: 'und'
+            },
+            streamDelta: ''
+        };
+
+        const running = translationBubbleReducer(initial, {
+            type: 'delta',
+            taskId: 'task-bubble',
+            delta: 'hello'
+        });
+        const completed = translationBubbleReducer(running, {
+            type: 'completed',
+            task: {
+                id: 'task-bubble',
+                status: 'completed',
+                sourceText: 'hello',
+                translatedText: '你好',
+                targetLanguage: 'zh-CN'
+            }
+        });
+
+        expect(running.streamDelta).toBe('hello');
+        expect(completed.task.status).toBe('completed');
+        expect(completed.task.translatedText).toBe('你好');
     });
 
     it('counts repeated source text once within one translation task', async () => {

@@ -8,6 +8,7 @@ import {
     type ProviderConfig,
     type SelectionCapture,
     type SelectionErrorCode,
+    type TranslationErrorCode,
     type TranslationTask
 } from '../../shared/contracts';
 import {
@@ -89,12 +90,31 @@ function normalizeSelection(value: string): string {
     return sourceText;
 }
 
-function safeTaskError(error: unknown): string {
+function safeTaskErrorCode(error: unknown): TranslationErrorCode {
     if (error instanceof ProviderError)
-        return providerErrorMessage(error.code);
+        return error.code;
     if (error instanceof SelectionError)
-        return error.message;
-    return 'Provider request failed.';
+        return error.code;
+    return 'request-failed';
+}
+
+function safeTaskError(error: unknown): string {
+    const code = safeTaskErrorCode(error);
+    if (code === 'request-failed')
+        return 'Provider request failed.';
+    if (code === 'empty-selection')
+        return 'No selected text was found.';
+    if (code === 'clipboard-read')
+        return 'Selected text could not be read.';
+    if (code === 'clipboard-restore')
+        return 'The original clipboard could not be restored.';
+    if (code === 'invalid-selection')
+        return 'Selected text is too large.';
+    if (code === 'unauthorized')
+        return 'IPC sender is not authorized.';
+    if (code === 'invalid-request')
+        return 'Request is invalid.';
+    return providerErrorMessage(code);
 }
 
 export class SelectionService {
@@ -191,7 +211,8 @@ export class SelectionService {
                 sourceText: capture.sourceText,
                 translatedText: '',
                 targetLanguage,
-                error: safeTaskError(error)
+                error: safeTaskError(error),
+                errorCode: safeTaskErrorCode(error)
             };
         }
     }

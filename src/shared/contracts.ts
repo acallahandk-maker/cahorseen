@@ -95,15 +95,6 @@ export const translationStatusSchema = z.enum([
     'failed'
 ]);
 
-export const translationTaskSchema = z.strictObject({
-    id: nonEmptyString,
-    status: translationStatusSchema,
-    sourceText: nonEmptyString,
-    translatedText: z.string(),
-    targetLanguage: nonEmptyString,
-    error: z.string().optional()
-});
-
 export const memoryEntrySchema = z.strictObject({
     id: nonEmptyString,
     sourceText: nonEmptyString,
@@ -169,7 +160,8 @@ export const connectionTestResultSchema = z.discriminatedUnion('success', [
 export const selectionErrorCodeSchema = z.enum([
     'empty-selection',
     'clipboard-read',
-    'clipboard-restore'
+    'clipboard-restore',
+    'invalid-selection'
 ]);
 
 export const translationErrorCodeSchema = z.union([
@@ -181,6 +173,16 @@ export const translationErrorCodeSchema = z.union([
 export const translationErrorSchema = z.strictObject({
     code: translationErrorCodeSchema,
     message: z.string().max(500)
+});
+
+export const translationTaskSchema = z.strictObject({
+    id: nonEmptyString,
+    status: translationStatusSchema,
+    sourceText: nonEmptyString,
+    translatedText: z.string(),
+    targetLanguage: nonEmptyString,
+    error: z.string().optional(),
+    errorCode: translationErrorCodeSchema.optional()
 });
 
 export const translationAckSchema = z.union([
@@ -215,7 +217,6 @@ export const translationEventSchema = z.discriminatedUnion('type', [
 ]);
 
 export const translationStartSchema = z.strictObject({
-    taskId: z.string().min(1).max(128).optional()
 });
 
 export const translationCancelSchema = z.strictObject({
@@ -226,7 +227,8 @@ export const translationIpcChannels = {
     captureSelection: 'desktop-pet:selection-capture',
     translateSelection: 'desktop-pet:selection-translate',
     cancel: 'desktop-pet:translation-cancel',
-    event: 'desktop-pet:translation-event'
+    event: 'desktop-pet:translation-event',
+    selectionShortcut: 'desktop-pet:selection-shortcut'
 } as const;
 
 export const selectionCaptureSchema = z.strictObject({
