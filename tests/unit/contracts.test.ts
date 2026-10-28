@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    MAX_CAPTURED_IMAGE_BYTES,
     capturedImageSchema,
     connectionTestResultSchema,
     heatStatisticSchema,
@@ -126,13 +127,13 @@ describe('shared contracts', () => {
             mimeType: 'image/png',
             width: 10,
             height: 20,
-            byteLength: 3
+            byteLength: 2
         })).toEqual({
             dataUrl: 'data:image/png;base64,abc',
             mimeType: 'image/png',
             width: 10,
             height: 20,
-            byteLength: 3
+            byteLength: 2
         });
         expect(heatStatisticSchema.parse({
             sourceText: 'hello',
@@ -144,6 +145,72 @@ describe('shared contracts', () => {
             recentOccurrenceCount: 1,
             lastUsedAt: '2026-10-28T00:00:00.000Z'
         })).toBeTruthy();
-        expect(performanceModeSchema.parse('normal')).toBe('normal');
+    });
+
+    it('exports the captured image byte limit', () => {
+        expect(MAX_CAPTURED_IMAGE_BYTES).toBe(8 * 1024 * 1024);
+    });
+
+    it('rejects inconsistent or oversized captured image payloads', () => {
+        const valid = {
+            dataUrl: 'data:image/png;base64,abc',
+            mimeType: 'image/png',
+            width: 10,
+            height: 20,
+            byteLength: 2
+        };
+        const oversizedPayload = Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64');
+        const invalidImages = [
+            {
+                ...valid,
+                dataUrl: 'data:image/jpeg;base64,abc'
+            },
+            {
+                ...valid,
+                byteLength: 3
+            },
+            {
+                ...valid,
+                dataUrl: 'data:image/png;base64,%%%'
+            },
+            {
+                ...valid,
+                dataUrl: `data:image/png;base64,${oversizedPayload}`,
+                byteLength: 8 * 1024 * 1024 + 1
+            }
+        ];
+
+        expect(invalidImages.map((image) => capturedImageSchema.safeParse(image).success)).toEqual([
+            false,
+            false,
+            false,
+            false
+        ]);
+    });
+
+    it.each([
+        { reason: 'normal', frameRate: 30 },
+        { reason: 'idle', frameRate: 10 },
+        { reason: 'hidden', frameRate: 10 },
+        { reason: 'battery', frameRate: 10 },
+        { reason: 'paused', frameRate: 0 },
+        { reason: 'fullscreen', frameRate: 0 }
+    ] as const)('maps $reason to $frameRate FPS', ({ reason, frameRate }) => {
+        const invalidFrameRate = frameRate === 30 ? 10 : 30;
+
+        expect(performanceModeSchema.parse({
+            reason,
+            frameRate,
+            suppressed: false
+        })).toEqual({
+            reason,
+            frameRate,
+            suppressed: false
+        });
+        expect(performanceModeSchema.safeParse({
+            reason,
+            frameRate: invalidFrameRate,
+            suppressed: false
+        }).success).toBe(false);
     });
 });

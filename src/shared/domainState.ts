@@ -1,14 +1,11 @@
-export type MascotState =
-    | 'idle'
-    | 'listening'
-    | 'thinking'
-    | 'success'
-    | 'error'
-    | 'quizzing'
-    | 'happy'
-    | 'sad';
+import {
+    mascotEventSchema,
+    mascotStateSchema,
+    type MascotEvent,
+    type MascotState
+} from './contracts';
 
-export type MascotEvent = MascotState;
+export type { MascotEvent, MascotState };
 
 const transitions: Readonly<Record<MascotState, Readonly<Partial<Record<MascotEvent, MascotState>>>>> = {
     idle: {
@@ -37,8 +34,10 @@ const transitions: Readonly<Record<MascotState, Readonly<Partial<Record<MascotEv
 };
 
 export function transitionMascotState(current: MascotState, event: MascotEvent): MascotState {
-    const next = transitions[current]?.[event];
+    const currentState = mascotStateSchema.parse(current);
+    const currentEvent = mascotEventSchema.parse(event);
+    const next = transitions[currentState]?.[currentEvent];
     if (!next)
-        throw new Error(`Unknown mascot transition: ${current} -> ${event}`);
+        throw new Error(`Unknown mascot transition: ${currentState} -> ${currentEvent}`);
     return next;
 }
