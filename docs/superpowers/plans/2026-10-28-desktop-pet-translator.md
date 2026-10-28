@@ -6,7 +6,7 @@
 
 **Architecture:** Electron has a small privileged main process, preload-mediated typed IPC, and isolated React renderer windows. Translation, screenshot processing, SQLite access, and learning scheduling run in workers or asynchronous services so they cannot block the UI. The renderer stores presentation state separately from domain state and reports mascot state through one state machine.
 
-**Tech Stack:** Electron, TypeScript, React, Vite, PixiJS, pixi-live2d-display with Live2D Cubism 4 SDK, `better-sqlite3`, Zod, Vitest, and Playwright Electron tests.
+**Tech Stack:** Electron, TypeScript, React, Vite, PixiJS, pixi-live2d-display with Live2D Cubism 4 SDK, `better-sqlite3`, Zod, Vitest, React Testing Library, and Electron subprocess smoke tests.
 
 **Spec:** `D:\zyu\develop\llmroot\cahorseen\DESIGN.md`
 
@@ -56,7 +56,8 @@
 - `src/renderer/learning/VocabularyHeatView.tsx`: ranking, filters, trends, and context drill-down.
 - `tests/unit`: pure service and state-machine tests.
 - `tests/integration`: SQLite, IPC, provider, and worker tests.
-- `tests/electron`: packaged-process smoke and core user-flow tests.
+- `tests/electron`: real Electron subprocess smoke tests using a test-only structured-result protocol; no Playwright attachment.
+- `tests/electron/harness.ts`: launches built Electron, reads one structured result marker, enforces timeout, and cleans child processes.
 - `tests/electron/fixtures/model`: a tiny test-only licensed or synthetic Live2D fixture.
 - `ASSETS.md`: source, license, attribution, and personal-use status for the Live2D model and visual/audio assets.
 
@@ -75,18 +76,20 @@
 **Files:**
 - Create: `package.json`, `eslint.config.mjs`, `electron.vite.config.ts`, `tsconfig.json`, `tsconfig.node.json`, `tsconfig.web.json`
 - Create: `src/main/index.ts`, `src/preload/index.ts`, `src/renderer/App.tsx`
+- Create: `src/main/smokeMode.ts`, `tests/electron/harness.ts`
 - Test: `tests/electron/appSmoke.test.ts`
 
 **Interfaces:**
 - Produces: `window.desktopPet.ping(): Promise<{ version: string }>` through preload.
+- Produces: `runElectronSmoke(scenario: string): Promise<ElectronSmokeResult>` in `tests/electron/harness.ts`, with result fields `scenario`, `payload`, `windowCount`, and `url`.
 
-- [ ] **Step 1: Write failing smoke test**
+- [ ] **Step 1: Write failing Electron subprocess smoke test**
 
-Test `tests/electron/appSmoke.test.ts::starts_without_node_exposure`: launch Electron with Playwright, assert the main window loads, `window.desktopPet.ping()` resolves, and `window.require` and `window.process` are undefined.
+Test `tests/electron/appSmoke.test.ts::starts_without_node_exposure`: spawn the built Electron executable through `runElectronSmoke("app-smoke")`, assert a structured success result, assert the main window loaded, assert `window.desktopPet.ping()` resolves to the package version, and assert `window.require` and `window.process` are undefined. The test must fail if the marker is missing, the child exits non-zero, or the timeout expires.
 
 - [ ] **Step 2: Create the Electron-Vite-TypeScript scaffold**
 
-Use strict TypeScript, separate `main`, `preload`, and `renderer` builds, ESLint, and expose only a Zod-validated `ping` channel. Keep `src/main/index.ts` limited to startup and shutdown.
+Use strict TypeScript, separate `main`, `preload`, and `renderer` builds, ESLint, and expose only a Zod-validated `ping` channel. Keep production startup in `src/main/index.ts`; keep environment-gated smoke assertions in `src/main/smokeMode.ts` and emit exactly one JSON marker for the test harness. Do not attach Playwright or a debugger.
 
 - [ ] **Step 3: Run scaffold verification**
 
@@ -189,7 +192,7 @@ Run: `git add src/main src/renderer tests && git commit -m "feat: add selection 
 - Create: `src/main/services/screenshotService.ts`
 - Create: `src/renderer/screenshot/RegionSelector.tsx`
 - Modify: `src/renderer/translation/TranslationBubble.tsx`, `src/main/workers/translationWorker.ts`
-- Test: `tests/unit/screenshotService.test.ts`, `tests/integration/screenshotTranslation.test.ts`, `tests/electron/screenshotUi.test.ts`
+- Test: `tests/unit/screenshotService.test.ts`, `tests/integration/screenshotTranslation.test.ts`, `tests/unit/RegionSelector.test.tsx`
 
 **Interfaces:**
 - Consumes: `translateImage(request, signal)`.
@@ -205,7 +208,7 @@ Capture only after shortcut, crop to the requested region, downscale to the conf
 
 - [ ] **Step 3: Run screenshot tests and typecheck**
 
-Run: `npm test -- tests/unit/screenshotService.test.ts tests/integration/screenshotTranslation.test.ts tests/electron/screenshotUi.test.ts && npm run typecheck`
+Run: `npm test -- tests/unit/screenshotService.test.ts tests/integration/screenshotTranslation.test.ts tests/unit/RegionSelector.test.tsx && npm run typecheck`
 Expected: all PASS.
 
 - [ ] **Step 4: Commit**
@@ -244,7 +247,7 @@ Run: `git add src/main src/renderer tests && git commit -m "feat: add live2d mas
 **Files:**
 - Create: `src/renderer/translation/TranslationBubble.tsx`, `src/renderer/settings/SettingsWindow.tsx`
 - Modify: `src/main/ipcRouter.ts`, `src/main/index.ts`
-- Test: `tests/electron/translationUi.test.ts`, `tests/electron/settingsUi.test.ts`
+- Test: `tests/unit/translationUi.test.tsx`, `tests/unit/settingsUi.test.tsx`
 
 **Interfaces:**
 - Consumes: provider service and translation task contracts from Tasks 3-5.
@@ -260,7 +263,7 @@ Keep secrets write-only after save unless the user explicitly replaces a key. Im
 
 - [ ] **Step 3: Run Electron UI tests and typecheck**
 
-Run: `npm test -- tests/electron/translationUi.test.ts tests/electron/settingsUi.test.ts && npm run typecheck`
+Run: `npm test -- tests/unit/translationUi.test.tsx tests/unit/settingsUi.test.tsx && npm run typecheck`
 Expected: all PASS.
 
 - [ ] **Step 4: Commit**
@@ -300,7 +303,7 @@ Run: `git add src/main src/renderer tests && git commit -m "feat: add local voca
 
 **Files:**
 - Modify: `src/renderer/settings/SettingsWindow.tsx`, `src/renderer/learning/VocabularyHeatView.tsx`
-- Test: `tests/electron/vocabularyUi.test.ts`
+- Test: `tests/unit/vocabularyUi.test.tsx`
 
 **Interfaces:**
 - Consumes: memory repository methods from Task 8.
@@ -316,7 +319,7 @@ Virtualize long lists, debounce searches, keep charts cheap and accessible, and 
 
 - [ ] **Step 3: Run vocabulary UI tests**
 
-Run: `npm test -- tests/electron/vocabularyUi.test.ts`
+Run: `npm test -- tests/unit/vocabularyUi.test.tsx`
 Expected: all PASS.
 
 - [ ] **Step 4: Commit**
@@ -328,7 +331,7 @@ Run: `git add src/renderer tests && git commit -m "feat: add vocabulary heat and
 **Files:**
 - Create: `src/main/services/quizScheduler.ts`, `src/renderer/pet/QuizBubble.tsx`
 - Modify: `src/main/services/memoryDatabase.ts`, `src/main/systemIntegration.ts`
-- Test: `tests/unit/quizScheduler.test.ts`, `tests/electron/quizUi.test.ts`
+- Test: `tests/unit/quizScheduler.test.ts`, `tests/unit/quizUi.test.tsx`
 
 **Interfaces:**
 - Consumes: `MemoryEntry`, `recordTranslation`, and mascot transitions.
@@ -344,7 +347,7 @@ Select from local memory only. Use stable distractor candidates from other entri
 
 - [ ] **Step 3: Run quiz tests and typecheck**
 
-Run: `npm test -- tests/unit/quizScheduler.test.ts tests/electron/quizUi.test.ts && npm run typecheck`
+Run: `npm test -- tests/unit/quizScheduler.test.ts tests/unit/quizUi.test.tsx && npm run typecheck`
 Expected: all PASS.
 
 - [ ] **Step 4: Commit**
