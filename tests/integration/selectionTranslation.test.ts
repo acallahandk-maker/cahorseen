@@ -25,6 +25,10 @@ import {
     type SelectionCaptureAdapter
 } from '../../src/main/services/selectionService';
 import { registerSelectionShortcut } from '../../src/main/selectionShortcut';
+import {
+    translationBubbleReducer,
+    type TranslationBubbleState
+} from '../../src/renderer/translation/translationState';
 
 const SYNTHETIC_API_KEY = 'synthetic-api-key-never-logged';
 const provider: ProviderConfig = {
@@ -330,6 +334,64 @@ describe('selection translation integration', () => {
 
         expect(onTrigger).toHaveBeenCalledTimes(1);
         expect(shortcut.unregister).toHaveBeenCalledWith('CommandOrControl+Shift+T');
+    });
+
+    it('ignores stale completed and failed terminal events from older translation generations', () => {
+        const initialState: TranslationBubbleState = {
+            task: {
+                id: 'starting',
+                status: 'pending',
+                sourceText: 'Selection translation',
+                translatedText: '',
+                targetLanguage: 'und'
+            },
+            streamDelta: ''
+        };
+        const olderState = translationBubbleReducer(initialState, {
+            type: 'started',
+            taskId: 'older-task'
+        });
+        const newerState = translationBubbleReducer(olderState, {
+            type: 'started',
+            taskId: 'newer-task'
+        });
+
+        const afterStaleCompleted = translationBubbleReducer(newerState, {
+            type: 'completed',
+            task: {
+                id: 'older-task',
+                status: 'completed',
+                sourceText: 'older selection',
+                translatedText: 'older translation',
+                targetLanguage: 'zh-CN'
+            }
+        });
+        const afterStaleFailed = translationBubbleReducer(afterStaleCompleted, {
+            type: 'failed',
+            taskId: 'older-task',
+            error: {
+                code: 'rate-limited',
+                message: 'Provider rate limit exceeded.'
+            }
+        });
+
+        expect(afterStaleCompleted).toBe(newerState);
+        expect(afterStaleFailed).toBe(newerState);
+        expect(afterStaleFailed.task.id).toBe('newer-task');
+        expect(afterStaleFailed.task.status).toBe('running');
+
+        const afterNewerCompleted = translationBubbleReducer(afterStaleFailed, {
+            type: 'completed',
+            task: {
+                id: 'newer-task',
+                status: 'completed',
+                sourceText: 'newer selection',
+                translatedText: 'newer translation',
+                targetLanguage: 'zh-CN'
+            }
+        });
+        expect(afterNewerCompleted.task.id).toBe('newer-task');
+        expect(afterNewerCompleted.task.status).toBe('completed');
     });
 
     it('streams typed IPC events and records repeated source text once in one task', async () => {

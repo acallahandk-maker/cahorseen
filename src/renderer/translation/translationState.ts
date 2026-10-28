@@ -27,21 +27,25 @@ export function translationBubbleReducer(
                 }
                 : state;
         case 'completed':
-            return {
-                task: event.task,
-                streamDelta: event.task.translatedText
-            };
+            return event.task.id === state.task.id
+                ? {
+                    task: event.task,
+                    streamDelta: event.task.translatedText
+                }
+                : state;
         case 'failed':
-            return {
-                task: {
-                    ...state.task,
-                    id: event.taskId,
-                    status: 'failed',
-                    translatedText: state.streamDelta,
-                    error: event.error.message,
-                    errorCode: event.error.code
-                },
-                streamDelta: state.streamDelta
-            };
+            return event.taskId === state.task.id
+                ? {
+                    task: {
+                        ...state.task,
+                        id: event.taskId,
+                        status: 'failed',
+                        translatedText: state.streamDelta,
+                        error: event.error.message,
+                        errorCode: event.error.code
+                    },
+                    streamDelta: state.streamDelta
+                }
+                : state;
     }
 }
