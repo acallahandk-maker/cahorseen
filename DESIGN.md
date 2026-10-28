@@ -36,7 +36,7 @@
 
 ### 3.3 模型配置
 
-- 内置 `Mimo`、`DeepSeek` 等预设入口。
+- 内置 `Mimo`、`DeepSeek` 等预设入口；`Mimo` 默认 Base URL 为 `https://token-plan-cn.xiaomimimo.com/v1`，并允许用户修改。
 - 支持自定义 OpenAI 兼容服务：名称、Base URL、API Key、文本模型、视觉模型。
 - API Key 保存后默认隐藏，只显示末尾字符。
 - 提供连接测试，分别验证文本和视觉模型能力。

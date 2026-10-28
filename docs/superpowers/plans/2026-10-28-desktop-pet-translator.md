@@ -18,6 +18,7 @@
 - Preserve and restore clipboard contents in fallback selection mode; never leave user clipboard replaced by translation input.
 - Store API keys only with Electron `safeStorage`; never put keys in logs, errors, history, crash reports, or plain JSON.
 - Use OpenAI-compatible Chat Completions with configurable Base URL, text model, and vision model; do not hard-code unconfirmed provider URLs.
+- The Mimo preset uses Base URL `https://token-plan-cn.xiaomimimo.com/v1`; punctuation shown after the URL in user-facing Markdown is not part of the endpoint. The DeepSeek endpoint remains user-editable unless independently verified.
 - Translation memories are local, searchable, editable, exportable, and removable; repeated text within one task counts once.
 - Quiz answers are four-option multiple choice and affect later scheduling; quizzes must be skippable and pausable.
 - Idle target is CPU below 1%; translation target is CPU below 15%; interaction feedback is below 200 ms excluding network time.
@@ -29,6 +30,7 @@
 ## File Structure
 
 - `package.json`: scripts, dependency versions, Electron packaging, and test entry points.
+- `eslint.config.mjs`: lint rules and script configuration for TypeScript, React, main, preload, and renderer code.
 - `electron.vite.config.ts`, `tsconfig*.json`: renderer/main/preload builds and strict TypeScript configuration.
 - `src/shared/contracts.ts`: Zod schemas and TypeScript types shared across processes.
 - `src/shared/domainState.ts`: mascot and translation state machine types and transitions.
@@ -71,7 +73,7 @@
 ### Task 1: Application Scaffold and Process Boundaries
 
 **Files:**
-- Create: `package.json`, `electron.vite.config.ts`, `tsconfig.json`, `tsconfig.node.json`, `tsconfig.web.json`
+- Create: `package.json`, `eslint.config.mjs`, `electron.vite.config.ts`, `tsconfig.json`, `tsconfig.node.json`, `tsconfig.web.json`
 - Create: `src/main/index.ts`, `src/preload/index.ts`, `src/renderer/App.tsx`
 - Test: `tests/electron/appSmoke.test.ts`
 
@@ -84,17 +86,18 @@ Test `tests/electron/appSmoke.test.ts::starts_without_node_exposure`: launch Ele
 
 - [ ] **Step 2: Create the Electron-Vite-TypeScript scaffold**
 
-Use strict TypeScript, separate `main`, `preload`, and `renderer` builds, and expose only a Zod-validated `ping` channel. Keep `src/main/index.ts` limited to startup and shutdown.
+Use strict TypeScript, separate `main`, `preload`, and `renderer` builds, ESLint, and expose only a Zod-validated `ping` channel. Keep `src/main/index.ts` limited to startup and shutdown.
 
 - [ ] **Step 3: Run scaffold verification**
 
 Run: `npm test -- tests/electron/appSmoke.test.ts`
 Run: `npm run typecheck`
+Run: `npm run lint`
 Expected: all PASS.
 
 - [ ] **Step 4: Commit**
 
-Run: `git add package.json package-lock.json electron.vite.config.ts tsconfig*.json src tests && git commit -m "chore: scaffold desktop pet app"`
+Run: `git add package.json package-lock.json eslint.config.mjs electron.vite.config.ts tsconfig*.json src tests && git commit -m "chore: scaffold desktop pet app"`
 
 ### Task 2: Shared Contracts and Mascot State Machine
 
@@ -141,7 +144,7 @@ Assert API keys are encrypted at rest and masked in summaries; empty/malformed/r
 
 - [ ] **Step 2: Implement provider presets and OpenAI-compatible calls**
 
-Provide DeepSeek and Mimo preset definitions without unconfirmed endpoint constants; users can edit Base URL and models. Validate Base URL, use bounded timeouts, and keep text and vision model IDs separate.
+Provide a Mimo preset with Base URL `https://token-plan-cn.xiaomimimo.com/v1` and a DeepSeek preset whose endpoint is editable until independently verified. Users can edit every Base URL and model. Validate Base URL, use bounded timeouts, and keep text and vision model IDs separate.
 
 - [ ] **Step 3: Run provider integration tests**
 
@@ -253,7 +256,7 @@ Assert streaming result rendering, copy/speak/pin/retry actions, provider CRUD, 
 
 - [ ] **Step 2: Implement result and settings windows**
 
-Keep secrets write-only after save unless the user explicitly replaces a key. Keep result windows lightweight and destroy their image resources after display.
+Keep secrets write-only after save unless the user explicitly replaces a key. Implement speech with the renderer's built-in `window.speechSynthesis`, without network requests. Keep result windows lightweight and destroy their image resources after display.
 
 - [ ] **Step 3: Run Electron UI tests and typecheck**
 
