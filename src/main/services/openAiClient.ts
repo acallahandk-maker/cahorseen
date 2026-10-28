@@ -22,7 +22,8 @@ export {
 export const MIN_PROVIDER_TIMEOUT_MS = 1;
 export const MAX_PROVIDER_TIMEOUT_MS = 120_000;
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
-export const MAX_RAW_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_NON_STREAMING_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_STREAMING_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 const providerErrorMessages: Record<ProviderErrorCode, string> = {
     'invalid-config': 'Provider configuration is invalid.',
@@ -208,6 +209,7 @@ function abortable<T>(
 async function readBodyWithAbort(
     response: Response,
     signal: AbortSignal,
+    maximumRawBytes: number,
     onChunk?: (chunk: string) => void
 ): Promise<string> {
     if (response.body === null)
@@ -225,7 +227,7 @@ async function readBodyWithAbort(
             if (result.done)
                 break;
             bodyBytes += result.value.byteLength;
-            if (bodyBytes > MAX_RAW_RESPONSE_BYTES)
+            if (bodyBytes > maximumRawBytes)
                 throw new ProviderError('invalid-response');
             const chunk = decoder.decode(result.value, { stream: true });
             if (onChunk === undefined)
@@ -394,7 +396,7 @@ async function parseStreamingResponse(
         onDelta?.(delta);
     };
 
-    await readBodyWithAbort(response, signal, (chunk) => {
+    await readBodyWithAbort(response, signal, MAX_STREAMING_RESPONSE_BYTES, (chunk) => {
         eventBuffer += chunk;
         const events = eventBuffer.split(/\r?\n\r?\n/);
         eventBuffer = events.pop() ?? '';
@@ -541,7 +543,11 @@ export class OpenAiClient {
 
                 let payload: unknown;
                 try {
-                    payload = JSON.parse(await readBodyWithAbort(response, requestSignal));
+                    payload = JSON.parse(await readBodyWithAbort(
+                        response,
+                        requestSignal,
+                        MAX_NON_STREAMING_RESPONSE_BYTES
+                    ));
                 } catch (error) {
                     if (error instanceof RequestAbortedError)
                         throw error;

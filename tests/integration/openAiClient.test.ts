@@ -88,6 +88,31 @@ function capturedImageOfSize(byteLength: number): CapturedImage {
     };
 }
 
+function chunkedBodyResponse(chunks: Uint8Array[], onChunk: () => void) {
+    let nextChunk = 0;
+    return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+            if (nextChunk === chunks.length) {
+                controller.close();
+                return;
+            }
+            onChunk();
+            controller.enqueue(chunks[nextChunk]);
+            nextChunk += 1;
+        }
+    }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+    });
+}
+
+function paddedSseResponse(paddingLength: number) {
+    return sseResponse([{
+        padding: 'a'.repeat(paddingLength),
+        choices: [{ delta: { content: 'ok' } }]
+    }]);
+}
+
 describe('OpenAI-compatible translation client', () => {
     it('sends text requests to the configured model and returns typed output', async () => {
         let requestBody: ReturnType<typeof bodyFromInit> | undefined;
@@ -587,6 +612,61 @@ describe('OpenAI-compatible translation client', () => {
 
         await expect(client.translateText({
             provider,
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'invalid-response' });
+    });
+
+    it('rejects cumulative non-stream response bytes over 1 MiB across chunks', async () => {
+        const encoder = new TextEncoder();
+        let chunksRead = 0;
+        const client = new OpenAiClient({
+            fetchImpl: async () => chunkedBodyResponse([
+                encoder.encode(' '.repeat(600 * 1024)),
+                encoder.encode(`${' '.repeat(600 * 1024)}${JSON.stringify({
+                    choices: [{ message: { content: 'must not be reached' } }]
+                })}`)
+            ], () => {
+                chunksRead += 1;
+            })
+        });
+
+        await expect(client.translateText({
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'invalid-response' });
+        expect(chunksRead).toBe(2);
+    });
+
+    it('accepts streaming SSE raw payloads over 1 MiB when output stays under the semantic limit', async () => {
+        const deltas: string[] = [];
+        const client = new OpenAiClient({
+            fetchImpl: async () => paddedSseResponse(1_200_000)
+        });
+
+        const result = await client.translateText({
+            provider: { ...provider, streaming: true },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        }, undefined, (delta) => {
+            deltas.push(delta);
+        });
+
+        expect(result).toEqual({
+            translatedText: 'ok',
+            model: 'synthetic-text-model'
+        });
+        expect(deltas).toEqual(['ok']);
+    });
+
+    it('rejects streaming SSE raw payloads over 2 MiB', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => paddedSseResponse(2_200_000)
+        });
+
+        await expect(client.translateText({
+            provider: { ...provider, streaming: true },
             sourceText: 'hello',
             targetLanguage: 'fr'
         })).rejects.toMatchObject({ code: 'invalid-response' });
