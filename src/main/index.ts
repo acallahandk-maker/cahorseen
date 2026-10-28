@@ -1,6 +1,12 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'node:path';
+import { registerIpcRouter } from './ipcRouter';
 import { runSmokeModeIfEnabled } from './smokeMode';
+import {
+    getProviderSummaries,
+    saveProvider,
+    testProvider
+} from './services/secureConfig';
 
 const pingChannel = 'desktop-pet:ping';
 
@@ -27,6 +33,14 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(() => {
     ipcMain.handle(pingChannel, () => ({ version: app.getVersion() }));
+    registerIpcRouter({
+        ipcMain,
+        secureConfig: {
+            saveProvider,
+            getProviderSummaries,
+            testProvider
+        }
+    });
     const window = createWindow();
     if (runSmokeModeIfEnabled(window))
         return;

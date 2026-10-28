@@ -1,0 +1,215 @@
+import { describe, expect, it } from 'vitest';
+import {
+    OpenAiClient,
+    ProviderError
+} from '../../src/main/services/openAiClient';
+import type { ProviderConfig } from '../../src/shared/contracts';
+
+const SYNTHETIC_API_KEY = 'sk-synthetic-test-only-123';
+const provider: ProviderConfig = {
+    id: 'synthetic-provider',
+    name: 'Synthetic Provider',
+    baseUrl: 'https://provider.example/v1',
+    apiKey: SYNTHETIC_API_KEY,
+    textModel: 'synthetic-text-model',
+    visionModel: 'synthetic-vision-model',
+    timeoutMs: 1_000
+};
+
+function jsonResponse(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: {
+            'content-type': 'application/json',
+            'x-api-key': SYNTHETIC_API_KEY
+        }
+    });
+}
+
+function bodyFromInit(init?: RequestInit) {
+    return JSON.parse(String(init?.body)) as {
+        model: string;
+        messages: Array<{ role: string; content: unknown }>;
+    };
+}
+
+describe('OpenAI-compatible translation client', () => {
+    it('sends text requests to the configured model and returns typed output', async () => {
+        let requestBody: ReturnType<typeof bodyFromInit> | undefined;
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => {
+                requestBody = bodyFromInit(init);
+                return jsonResponse({
+                    choices: [{ message: { content: 'Bonjour' } }]
+                });
+            }
+        });
+
+        const result = await client.translateText({
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        });
+
+        expect(result).toEqual({
+            translatedText: 'Bonjour',
+            model: 'synthetic-text-model'
+        });
+        expect(requestBody?.model).toBe('synthetic-text-model');
+        expect(requestBody?.messages.some((message) => {
+            return message.role === 'user' && String(message.content).includes('hello');
+        })).toBe(true);
+    });
+
+    it('sends image requests to the separate vision model', async () => {
+        let requestBody: ReturnType<typeof bodyFromInit> | undefined;
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => {
+                requestBody = bodyFromInit(init);
+                return jsonResponse({
+                    choices: [{ message: { content: 'translated image text' } }]
+                });
+            }
+        });
+
+        const result = await client.translateImage({
+            provider,
+            image: {
+                dataUrl: 'data:image/png;base64,AA==',
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+                byteLength: 1
+            },
+            targetLanguage: 'en'
+        });
+
+        expect(result).toEqual({
+            translatedText: 'translated image text',
+            model: 'synthetic-vision-model'
+        });
+        expect(requestBody?.model).toBe('synthetic-vision-model');
+        expect(requestBody?.messages.some((message) => {
+            return JSON.stringify(message.content).includes('data:image/png;base64,AA==');
+        })).toBe(true);
+    });
+
+    it.each([
+        {
+            name: 'empty response',
+            response: () => jsonResponse({ choices: [] }),
+            code: 'invalid-response'
+        },
+        {
+            name: 'structurally malformed response',
+            response: () => jsonResponse({ choices: [null] }),
+            code: 'invalid-response'
+        },
+        {
+            name: 'empty translation content',
+            response: () => jsonResponse({
+                choices: [{ message: { content: '' } }]
+            }),
+            code: 'invalid-response'
+        },
+        {
+            name: 'malformed response',
+            response: () => new Response('<html>not json</html>', {
+                status: 200,
+                headers: {
+                    'content-type': 'text/html',
+                    'x-api-key': SYNTHETIC_API_KEY
+                }
+            }),
+            code: 'invalid-response'
+        },
+        {
+            name: 'rate-limited response',
+            response: () => jsonResponse({
+                error: { message: `secret=${SYNTHETIC_API_KEY}` }
+            }, 429),
+            code: 'rate-limited'
+        }
+    ])('returns safe typed errors for $name', async ({ response, code }) => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => response()
+        });
+
+        try {
+            await client.translateText({
+                provider,
+                sourceText: 'hello',
+                targetLanguage: 'fr'
+            });
+            throw new Error('expected provider request to fail');
+        } catch (error) {
+            expect(error).toBeInstanceOf(ProviderError);
+            expect((error as ProviderError).code).toBe(code);
+            expect(String(error).includes(SYNTHETIC_API_KEY)).toBe(false);
+            expect(JSON.stringify(error).includes(SYNTHETIC_API_KEY)).toBe(false);
+            expect(JSON.stringify(error).includes('x-api-key')).toBe(false);
+        }
+    });
+
+    it('returns timeout errors without provider response details', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => new Promise((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                    reject(new DOMException('aborted', 'AbortError'));
+                });
+            })
+        });
+
+        await expect(client.translateText({
+            provider: { ...provider, timeoutMs: 5 },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'timeout' });
+    });
+
+    it('cancels requests when the caller aborts', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => new Promise((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                    reject(new DOMException('aborted', 'AbortError'));
+                });
+            })
+        });
+        const controller = new AbortController();
+        const request = client.translateText({
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        }, controller.signal);
+        controller.abort();
+
+        await expect(request).rejects.toMatchObject({ code: 'aborted' });
+    });
+
+    it('returns typed errors for malformed image input without echoing the image', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => jsonResponse({
+                choices: [{ message: { content: 'should not be reached' } }]
+            })
+        });
+
+        try {
+            await client.translateImage({
+                provider,
+                image: {
+                    dataUrl: 'data:image/png;base64,AAAA',
+                    mimeType: 'image/png',
+                    width: 1,
+                    height: 1,
+                    byteLength: 1
+                },
+                targetLanguage: 'en'
+            });
+            throw new Error('expected image request to fail');
+        } catch (error) {
+            expect(error).toBeInstanceOf(ProviderError);
+            expect((error as ProviderError).code).toBe('invalid-config');
+            expect(String(error).includes('AAAA')).toBe(false);
+        }
+    });
+});
