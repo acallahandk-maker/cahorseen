@@ -58,7 +58,14 @@ async function collectSmokePayload(window: BrowserWindowType): Promise<SmokePayl
             setTimeout(() => reject(new Error('Renderer smoke ping timed out')), 5_000);
         })
     ]);
-    return result as SmokePayload;
+    const payload = result as SmokePayload;
+    const exposures = [
+        payload.requireIsUndefined !== true ? 'window.require' : undefined,
+        payload.processIsUndefined !== true ? 'window.process' : undefined
+    ].filter((exposure): exposure is string => exposure !== undefined);
+    if (exposures.length > 0)
+        throw new Error(`Renderer smoke assertion failed: ${exposures.join(' and ')} must be undefined`);
+    return payload;
 }
 
 export function runSmokeModeIfEnabled(window: BrowserWindowType): boolean {

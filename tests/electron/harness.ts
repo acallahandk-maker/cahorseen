@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 const electronPath = createRequire(import.meta.url)('electron') as string;
 type ElectronSmokeProcess = ChildProcessByStdio<null, Readable, Readable>;
+const nodeExposureScenario = 'app-smoke-node-exposure';
+const nodeExposureRendererUrl = 'data:text/html,<script>window.require = {}; window.process = {};</script>';
 
 export interface ElectronSmokeResult {
     scenario: string;
@@ -82,6 +84,14 @@ function killElectronProcessTree(child: ElectronSmokeProcess): void {
 export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeResult> {
     const projectRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
     const userDataDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-electron-smoke-'));
+    const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        DESKTOP_PET_SMOKE_SCENARIO: scenario
+    };
+    if (scenario === nodeExposureScenario)
+        environment.ELECTRON_RENDERER_URL = nodeExposureRendererUrl;
+    else
+        delete environment.ELECTRON_RENDERER_URL;
 
     try {
         return await new Promise<ElectronSmokeResult>((resolve, reject) => {
@@ -92,10 +102,7 @@ export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeR
                 projectRoot
             ], {
                 cwd: projectRoot,
-                env: {
-                    ...process.env,
-                    DESKTOP_PET_SMOKE_SCENARIO: scenario
-                },
+                env: environment,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 windowsHide: true
             }) as ElectronSmokeProcess;
