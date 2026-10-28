@@ -1,23 +1,26 @@
 import {
+    MAX_CONTEXT_CHARS,
+    MAX_SOURCE_TEXT_CHARS,
+    MAX_SYSTEM_PROMPT_CHARS,
+    MAX_TARGET_LANGUAGE_CHARS,
+    MAX_TRANSLATED_TEXT_CHARS,
     capturedImageSchema,
     providerConfigSchema,
     type CapturedImage,
+    type ProviderErrorCode,
     type ProviderConfig
 } from '../../shared/contracts';
 
+export {
+    MAX_CONTEXT_CHARS,
+    MAX_SOURCE_TEXT_CHARS,
+    MAX_SYSTEM_PROMPT_CHARS,
+    MAX_TARGET_LANGUAGE_CHARS,
+    MAX_TRANSLATED_TEXT_CHARS
+};
 export const MIN_PROVIDER_TIMEOUT_MS = 1;
 export const MAX_PROVIDER_TIMEOUT_MS = 120_000;
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
-
-export type ProviderErrorCode =
-    | 'invalid-config'
-    | 'invalid-response'
-    | 'authentication'
-    | 'rate-limited'
-    | 'timeout'
-    | 'aborted'
-    | 'network'
-    | 'server';
 
 const providerErrorMessages: Record<ProviderErrorCode, string> = {
     'invalid-config': 'Provider configuration is invalid.',
@@ -27,7 +30,11 @@ const providerErrorMessages: Record<ProviderErrorCode, string> = {
     timeout: 'Provider request timed out.',
     aborted: 'Provider request was cancelled.',
     network: 'Provider request failed.',
-    server: 'Provider service error.'
+    server: 'Provider service error.',
+    'invalid-storage': 'Provider storage is invalid.',
+    'provider-not-found': 'Provider is not configured.',
+    'storage-unavailable': 'Secure storage is unavailable.',
+    'storage-error': 'Provider storage could not be updated.'
 };
 
 export class ProviderError extends Error {
@@ -51,12 +58,14 @@ export class ProviderError extends Error {
 export interface TextTranslationRequest {
     provider: ProviderConfig;
     sourceText: string;
+    context?: string;
     targetLanguage: string;
 }
 
 export interface ImageTranslationRequest {
     provider: ProviderConfig;
     image: CapturedImage;
+    context?: string;
     targetLanguage: string;
 }
 
@@ -64,6 +73,8 @@ export interface TranslationResult {
     translatedText: string;
     model: string;
 }
+
+export type TranslationDeltaHandler = (delta: string) => void;
 
 export interface OpenAiClientOptions {
     fetchImpl?: typeof fetch;
@@ -82,7 +93,7 @@ export function validateProviderConfig(provider: ProviderConfig): ProviderConfig
     }
 
     if (
-        !['http:', 'https:'].includes(baseUrl.protocol)
+        baseUrl.protocol !== 'https:'
         || baseUrl.username.length > 0
         || baseUrl.password.length > 0
         || baseUrl.search.length > 0
@@ -99,6 +110,21 @@ export function validateProviderConfig(provider: ProviderConfig): ProviderConfig
     )
         throw new ProviderError('invalid-config');
 
+    if (
+        parsed.data.systemPrompt !== undefined
+        && parsed.data.systemPrompt.length > MAX_SYSTEM_PROMPT_CHARS
+    )
+        throw new ProviderError('invalid-config');
+
+    if (
+        parsed.data.targetLanguage !== undefined
+        && requireBoundedValue(
+            parsed.data.targetLanguage,
+            MAX_TARGET_LANGUAGE_CHARS
+        ) === undefined
+    )
+        throw new ProviderError('invalid-config');
+
     return parsed.data;
 }
 
@@ -110,12 +136,20 @@ interface ChatCompletionBody {
     model: string;
     messages: Array<{ role: 'system' | 'user'; content: ChatContent }>;
     temperature: number;
+    stream: boolean;
 }
 
-function requireNonEmpty(value: unknown): string {
-    if (typeof value !== 'string' || value.trim().length === 0)
-        throw new ProviderError('invalid-config');
+function requireBoundedValue(value: unknown, maximumLength: number): string | undefined {
+    if (typeof value !== 'string' || value.length > maximumLength)
+        return undefined;
     return value;
+}
+
+function requireNonEmpty(value: unknown, maximumLength: number): string {
+    const bounded = requireBoundedValue(value, maximumLength);
+    if (bounded === undefined || bounded.trim().length === 0)
+        throw new ProviderError('invalid-config');
+    return bounded;
 }
 
 function translationInstruction(targetLanguage: string): string {
@@ -136,13 +170,75 @@ function errorForStatus(status: number): ProviderErrorCode {
     return 'server';
 }
 
-async function fetchWithTimeout(
-    fetchImpl: typeof fetch,
-    input: string,
-    init: RequestInit,
+class RequestAbortedError extends Error {
+    constructor() {
+        super('Request aborted');
+        this.name = 'RequestAbortedError';
+    }
+}
+
+function abortable<T>(
+    promise: Promise<T>,
+    signal: AbortSignal,
+    onAbort: () => void
+): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const abort = () => {
+            onAbort();
+            reject(new RequestAbortedError());
+        };
+        if (signal.aborted) {
+            abort();
+            return;
+        }
+
+        signal.addEventListener('abort', abort, { once: true });
+        promise.then(resolve, reject).finally(() => {
+            signal.removeEventListener('abort', abort);
+        });
+    });
+}
+
+async function readBodyWithAbort(
+    response: Response,
+    signal: AbortSignal,
+    onChunk?: (chunk: string) => void
+): Promise<string> {
+    if (response.body === null)
+        return '';
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let body = '';
+    try {
+        while (true) {
+            const result = await abortable(reader.read(), signal, () => {
+                void reader.cancel().catch(() => undefined);
+            });
+            if (result.done)
+                break;
+            const chunk = decoder.decode(result.value, { stream: true });
+            if (onChunk === undefined)
+                body += chunk;
+            else
+                onChunk(chunk);
+        }
+        const finalChunk = decoder.decode();
+        if (onChunk === undefined)
+            body += finalChunk;
+        else if (finalChunk.length > 0)
+            onChunk(finalChunk);
+        return body;
+    } finally {
+        void reader.cancel().catch(() => undefined);
+    }
+}
+
+async function withRequestSignal<T>(
     timeoutMs: number,
-    signal?: AbortSignal
-): Promise<Response> {
+    signal: AbortSignal | undefined,
+    operation: (requestSignal: AbortSignal) => Promise<T>
+): Promise<T> {
     if (signal?.aborted)
         throw new ProviderError('aborted');
 
@@ -156,11 +252,10 @@ async function fetchWithTimeout(
     }, timeoutMs);
 
     try {
-        return await fetchImpl(input, {
-            ...init,
-            signal: controller.signal
-        });
-    } catch {
+        return await operation(controller.signal);
+    } catch (error) {
+        if (error instanceof ProviderError)
+            throw error;
         if (timedOut)
             throw new ProviderError('timeout');
         if (signal?.aborted)
@@ -191,8 +286,98 @@ function parseTranslationResponse(payload: unknown): string {
     const content = (message as { content?: unknown }).content;
     if (typeof content !== 'string' || content.trim().length === 0)
         throw new ProviderError('invalid-response');
+    if (content.length > MAX_TRANSLATED_TEXT_CHARS)
+        throw new ProviderError('invalid-response');
 
     return content;
+}
+
+function parseStreamDelta(payload: unknown): string | undefined {
+    if (typeof payload !== 'object' || payload === null)
+        throw new ProviderError('invalid-response');
+
+    const choices: unknown = (payload as { choices?: unknown }).choices;
+    const usage: unknown = (payload as { usage?: unknown }).usage;
+    if (choices === undefined) {
+        if (usage !== undefined)
+            return undefined;
+        throw new ProviderError('invalid-response');
+    }
+    if (!Array.isArray(choices))
+        throw new ProviderError('invalid-response');
+    if (choices.length === 0)
+        return undefined;
+
+    const firstChoice: unknown = choices[0];
+    if (typeof firstChoice !== 'object' || firstChoice === null)
+        throw new ProviderError('invalid-response');
+
+    const delta: unknown = (firstChoice as { delta?: unknown }).delta;
+    if (delta === undefined)
+        return undefined;
+    if (typeof delta !== 'object' || delta === null)
+        throw new ProviderError('invalid-response');
+
+    const content: unknown = (delta as { content?: unknown }).content;
+    if (content === undefined)
+        return undefined;
+    if (typeof content !== 'string')
+        throw new ProviderError('invalid-response');
+    return content;
+}
+
+async function parseStreamingResponse(
+    response: Response,
+    signal: AbortSignal,
+    onDelta?: TranslationDeltaHandler
+): Promise<string> {
+    let eventBuffer = '';
+    let translatedText = '';
+    let completed = false;
+
+    const consumeEvent = (event: string) => {
+        const data = event
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trimStart())
+            .join('\n');
+        if (data.length === 0)
+            return;
+        if (data === '[DONE]') {
+            completed = true;
+            return;
+        }
+
+        let payload: unknown;
+        try {
+            payload = JSON.parse(data);
+        } catch {
+            throw new ProviderError('invalid-response');
+        }
+
+        const delta = parseStreamDelta(payload);
+        if (delta === undefined || delta.length === 0)
+            return;
+        if (translatedText.length + delta.length > MAX_TRANSLATED_TEXT_CHARS)
+            throw new ProviderError('invalid-response');
+
+        translatedText += delta;
+        onDelta?.(delta);
+    };
+
+    await readBodyWithAbort(response, signal, (chunk) => {
+        eventBuffer += chunk;
+        const events = eventBuffer.split(/\r?\n\r?\n/);
+        eventBuffer = events.pop() ?? '';
+        for (const event of events)
+            consumeEvent(event);
+    });
+    if (eventBuffer.length > 0)
+        consumeEvent(eventBuffer);
+
+    if (!completed || translatedText.length === 0)
+        throw new ProviderError('invalid-response');
+    return translatedText;
 }
 
 export class OpenAiClient {
@@ -204,27 +389,41 @@ export class OpenAiClient {
 
     async translateText(
         request: TextTranslationRequest,
-        signal?: AbortSignal
+        signal?: AbortSignal,
+        onDelta?: TranslationDeltaHandler
     ): Promise<TranslationResult> {
         const provider = validateProviderConfig(request.provider);
-        const sourceText = requireNonEmpty(request.sourceText);
-        const targetLanguage = requireNonEmpty(request.targetLanguage);
+        const sourceText = requireNonEmpty(
+            request.sourceText,
+            MAX_SOURCE_TEXT_CHARS
+        );
+        const context = requireBoundedValue(request.context, MAX_CONTEXT_CHARS);
+        if (request.context !== undefined && context === undefined)
+            throw new ProviderError('invalid-config');
+        const targetLanguage = requireNonEmpty(
+            request.targetLanguage,
+            MAX_TARGET_LANGUAGE_CHARS
+        );
+        const contextSection = context === undefined
+            ? ''
+            : `\n\nContext:\n${context}`;
         const messages: ChatCompletionBody['messages'] = [
             {
                 role: 'user',
-                content: `${translationInstruction(targetLanguage)}\n\n${sourceText}`
+                content: `${translationInstruction(targetLanguage)}\n\n${sourceText}${contextSection}`
             }
         ];
 
         if (provider.systemPrompt !== undefined)
             messages.unshift({ role: 'system', content: provider.systemPrompt });
 
-        return this.requestTranslation(provider, messages, signal);
+        return this.requestTranslation(provider, messages, signal, onDelta);
     }
 
     async translateImage(
         request: ImageTranslationRequest,
-        signal?: AbortSignal
+        signal?: AbortSignal,
+        onDelta?: TranslationDeltaHandler
     ): Promise<TranslationResult> {
         const provider = validateProviderConfig(request.provider);
         let image: CapturedImage;
@@ -233,14 +432,23 @@ export class OpenAiClient {
         } catch {
             throw new ProviderError('invalid-config');
         }
-        const targetLanguage = requireNonEmpty(request.targetLanguage);
+        const context = requireBoundedValue(request.context, MAX_CONTEXT_CHARS);
+        if (request.context !== undefined && context === undefined)
+            throw new ProviderError('invalid-config');
+        const targetLanguage = requireNonEmpty(
+            request.targetLanguage,
+            MAX_TARGET_LANGUAGE_CHARS
+        );
+        const contextSection = context === undefined
+            ? ''
+            : `\n\nContext:\n${context}`;
         const messages: ChatCompletionBody['messages'] = [
             {
                 role: 'user',
                 content: [
                     {
                         type: 'text',
-                        text: translationInstruction(targetLanguage)
+                        text: `${translationInstruction(targetLanguage)}${contextSection}`
                     },
                     {
                         type: 'image_url',
@@ -255,18 +463,20 @@ export class OpenAiClient {
         if (provider.systemPrompt !== undefined)
             messages.unshift({ role: 'system', content: provider.systemPrompt });
 
-        return this.requestTranslation(provider, messages, signal);
+        return this.requestTranslation(provider, messages, signal, onDelta);
     }
 
     private async requestTranslation(
         provider: ProviderConfig,
         messages: ChatCompletionBody['messages'],
-        signal?: AbortSignal
+        signal: AbortSignal | undefined,
+        onDelta?: TranslationDeltaHandler
     ): Promise<TranslationResult> {
         const body: ChatCompletionBody = {
             model: '',
             messages,
-            temperature: 0.2
+            temperature: 0.2,
+            stream: provider.streaming === true
         };
         const model = messages.some((message) => {
             return Array.isArray(message.content)
@@ -274,34 +484,51 @@ export class OpenAiClient {
         }) ? provider.visionModel : provider.textModel;
         body.model = model;
 
-        const response = await fetchWithTimeout(
-            this.fetchImpl,
-            chatCompletionUrl(provider.baseUrl),
-            {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${provider.apiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(body)
-            },
+        return withRequestSignal(
             provider.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS,
-            signal
+            signal,
+            async (requestSignal) => {
+                const response = await this.fetchImpl(
+                    chatCompletionUrl(provider.baseUrl),
+                    {
+                        method: 'POST',
+                        headers: {
+                            Authorization: `Bearer ${provider.apiKey}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(body),
+                        signal: requestSignal
+                    }
+                );
+
+                if (!response.ok)
+                    throw new ProviderError(errorForStatus(response.status));
+
+                if (body.stream) {
+                    return {
+                        translatedText: await parseStreamingResponse(
+                            response,
+                            requestSignal,
+                            onDelta
+                        ),
+                        model
+                    };
+                }
+
+                let payload: unknown;
+                try {
+                    payload = JSON.parse(await readBodyWithAbort(response, requestSignal));
+                } catch (error) {
+                    if (error instanceof RequestAbortedError)
+                        throw error;
+                    throw new ProviderError('invalid-response');
+                }
+
+                return {
+                    translatedText: parseTranslationResponse(payload),
+                    model
+                };
+            }
         );
-
-        if (!response.ok)
-            throw new ProviderError(errorForStatus(response.status));
-
-        let payload: unknown;
-        try {
-            payload = await response.json();
-        } catch {
-            throw new ProviderError('invalid-response');
-        }
-
-        return {
-            translatedText: parseTranslationResponse(payload),
-            model
-        };
     }
 }

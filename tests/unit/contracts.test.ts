@@ -47,6 +47,23 @@ describe('shared contracts', () => {
 
         expect(providerConfigSchema.parse(valid)).toEqual(valid);
         expect(() => providerConfigSchema.parse({ ...valid, apiKey: '' })).toThrow();
+        expect(providerConfigSchema.safeParse({
+            ...valid,
+            baseUrl: 'http://provider.example/v1'
+        }).success).toBe(false);
+        expect(providerConfigSchema.safeParse({
+            ...valid,
+            systemPrompt: 'a'.repeat(4_001)
+        }).success).toBe(false);
+        expect(providerConfigSchema.safeParse({
+            ...valid,
+            targetLanguage: 'a'.repeat(65)
+        }).success).toBe(false);
+        expect(providerConfigSchema.safeParse({
+            ...valid,
+            systemPrompt: 'a'.repeat(4_000),
+            targetLanguage: 'a'.repeat(64)
+        }).success).toBe(true);
         expect(() => providerConfigSchema.parse({ ...valid, extra: 'not allowed' })).toThrow();
     });
 
@@ -107,6 +124,34 @@ describe('shared contracts', () => {
             message: 'ok',
             latencyMs: 12
         });
+        expect(connectionTestResultSchema.parse({
+            capability: 'vision',
+            success: false,
+            message: 'Provider authentication failed.',
+            errorCode: 'authentication'
+        })).toEqual({
+            capability: 'vision',
+            success: false,
+            message: 'Provider authentication failed.',
+            errorCode: 'authentication'
+        });
+        expect(connectionTestResultSchema.safeParse({
+            capability: 'text',
+            success: true,
+            message: 'ok',
+            errorCode: 'server'
+        }).success).toBe(false);
+        expect(connectionTestResultSchema.safeParse({
+            capability: 'text',
+            success: false,
+            message: 'failed'
+        }).success).toBe(false);
+        expect(connectionTestResultSchema.safeParse({
+            capability: 'text',
+            success: false,
+            message: 'failed',
+            errorCode: 'not-a-provider-code'
+        }).success).toBe(false);
         expect(screenBoundsSchema.parse({ x: 1, y: 2, width: 3, height: 4 })).toEqual({
             x: 1,
             y: 2,

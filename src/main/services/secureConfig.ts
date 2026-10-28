@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
     type ConnectionTestResult,
+    type ProviderErrorCode,
     type ProviderConfig,
     type ProviderSummary
 } from '../../shared/contracts';
@@ -26,7 +27,6 @@ export interface SecureConfigServiceOptions {
 }
 
 export interface TestProviderOptions {
-    providerId?: string;
     fetchImpl?: typeof fetch;
     signal?: AbortSignal;
 }
@@ -92,10 +92,18 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     }
 ];
 
-const storedProviderSchema = z.object({
+const storedProviderSchema = z.strictObject({
     id: z.string().min(1),
     name: z.string().min(1),
-    baseUrl: z.string().url(),
+    baseUrl: z.string().url().refine((value) => {
+        try {
+            return new URL(value).protocol === 'https:';
+        } catch {
+            return false;
+        }
+    }, {
+        message: 'Base URL must use HTTPS'
+    }),
     encryptedApiKey: z.string().min(1),
     textModel: z.string().min(1),
     visionModel: z.string().min(1),
@@ -105,14 +113,22 @@ const storedProviderSchema = z.object({
     streaming: z.boolean().optional()
 });
 
-const storedProviderListSchema = z.array(storedProviderSchema);
 type StoredProvider = z.infer<typeof storedProviderSchema>;
+const storedStateSchema = z.strictObject({
+    version: z.literal(1),
+    activeProviderId: z.string().min(1).optional(),
+    providers: z.array(storedProviderSchema)
+});
+const persistedStateSchema = z.union([
+    storedStateSchema,
+    z.array(storedProviderSchema)
+]);
+type StoredState = z.infer<typeof storedStateSchema>;
 
 export class SecureConfigService {
     private readonly storagePath: string;
     private readonly safeStorage: SafeStorageLike;
     private readonly openAiClient: OpenAiClient;
-    private activeProviderId: string | undefined;
 
     constructor(options: SecureConfigServiceOptions) {
         this.storagePath = options.storagePath;
@@ -122,7 +138,7 @@ export class SecureConfigService {
         });
     }
 
-    async saveProvider(config: ProviderConfig): Promise<void> {
+    async saveProvider(config: ProviderConfig): Promise<ProviderSummary> {
         let validated: ProviderConfig;
         try {
             validated = validateProviderConfig(config);
@@ -156,35 +172,38 @@ export class SecureConfigService {
             timeoutMs: validated.timeoutMs,
             streaming: validated.streaming
         };
-        const providers = await this.readProviders();
-        const existingIndex = providers.findIndex((provider) => provider.id === id);
+        const state = await this.readState();
+        const existingIndex = state.providers.findIndex((provider) => provider.id === id);
         if (existingIndex >= 0)
-            providers[existingIndex] = storedProvider;
+            state.providers[existingIndex] = storedProvider;
         else
-            providers.push(storedProvider);
+            state.providers.push(storedProvider);
+        state.activeProviderId ??= id;
 
-        await this.writeProviders(providers);
-        this.activeProviderId = id;
+        await this.writeState(state);
+        return toProviderSummary(storedProvider);
     }
 
     async getProviderSummaries(): Promise<ProviderSummary[]> {
-        return (await this.readProviders()).map((provider) => ({
-            id: provider.id,
-            name: provider.name,
-            baseUrl: provider.baseUrl,
-            hasApiKey: provider.encryptedApiKey.length > 0,
-            textModel: provider.textModel,
-            visionModel: provider.visionModel
-        }));
+        return (await this.readState()).providers.map(toProviderSummary);
+    }
+
+    async setActiveProvider(providerId: string): Promise<void> {
+        const state = await this.readState();
+        if (!state.providers.some((provider) => provider.id === providerId))
+            throw new SecureConfigError('provider-not-found');
+        state.activeProviderId = providerId;
+        await this.writeState(state);
     }
 
     async testProvider(
+        providerId: string,
         capability: 'text' | 'vision',
         options: TestProviderOptions = {}
     ): Promise<ConnectionTestResult> {
         const startedAt = Date.now();
         try {
-            const provider = await this.getProviderForTest(options.providerId);
+            const provider = await this.getProviderForTest(providerId);
             const client = options.fetchImpl === undefined
                 ? this.openAiClient
                 : new OpenAiClient({ fetchImpl: options.fetchImpl });
@@ -219,17 +238,16 @@ export class SecureConfigService {
             return {
                 capability,
                 success: false,
-                message: safeErrorMessage(error)
+                message: safeErrorMessage(error),
+                errorCode: safeErrorCode(error)
             };
         }
     }
 
-    private async getProviderForTest(providerId?: string): Promise<ProviderConfig> {
-        const id = providerId ?? this.activeProviderId;
-        if (id === undefined)
-            throw new SecureConfigError('provider-not-found');
-
-        const storedProvider = (await this.readProviders()).find((provider) => provider.id === id);
+    private async getProviderForTest(providerId: string): Promise<ProviderConfig> {
+        const storedProvider = (await this.readState()).providers.find(
+            (provider) => provider.id === providerId
+        );
         if (storedProvider === undefined)
             throw new SecureConfigError('provider-not-found');
 
@@ -256,28 +274,37 @@ export class SecureConfigService {
         });
     }
 
-    private async readProviders(): Promise<StoredProvider[]> {
+    private async readState(): Promise<StoredState> {
         let raw: string;
         try {
             raw = await readFile(this.storagePath, 'utf8');
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-                return [];
+                return {
+                    version: 1,
+                    providers: []
+                };
             throw new SecureConfigError('storage-error');
         }
 
         try {
-            return storedProviderListSchema.parse(JSON.parse(raw));
+            const persisted = persistedStateSchema.parse(JSON.parse(raw));
+            return Array.isArray(persisted)
+                ? {
+                    version: 1,
+                    providers: persisted
+                }
+                : persisted;
         } catch {
             throw new SecureConfigError('invalid-storage');
         }
     }
 
-    private async writeProviders(providers: StoredProvider[]): Promise<void> {
+    private async writeState(state: StoredState): Promise<void> {
         const temporaryPath = `${this.storagePath}.${randomUUID()}.tmp`;
         try {
             await mkdir(dirname(this.storagePath), { recursive: true });
-            await writeFile(temporaryPath, JSON.stringify(providers), {
+            await writeFile(temporaryPath, JSON.stringify(state), {
                 encoding: 'utf8',
                 mode: 0o600
             });
@@ -289,10 +316,27 @@ export class SecureConfigService {
     }
 }
 
+function toProviderSummary(provider: StoredProvider): ProviderSummary {
+    return {
+        id: provider.id,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        hasApiKey: provider.encryptedApiKey.length > 0,
+        textModel: provider.textModel,
+        visionModel: provider.visionModel
+    };
+}
+
 function safeErrorMessage(error: unknown): string {
     if (error instanceof ProviderError || error instanceof SecureConfigError)
         return error.message;
     return 'Provider request failed.';
+}
+
+function safeErrorCode(error: unknown): ProviderErrorCode {
+    if (error instanceof ProviderError || error instanceof SecureConfigError)
+        return error.code;
+    return 'network';
 }
 
 let defaultService: Promise<SecureConfigService> | undefined;
@@ -315,8 +359,12 @@ export function createSecureConfigService(
     return new SecureConfigService(options);
 }
 
-export async function saveProvider(config: ProviderConfig): Promise<void> {
-    await (await getDefaultService()).saveProvider(config);
+export async function saveProvider(config: ProviderConfig): Promise<ProviderSummary> {
+    return (await getDefaultService()).saveProvider(config);
+}
+
+export async function setActiveProvider(providerId: string): Promise<void> {
+    await (await getDefaultService()).setActiveProvider(providerId);
 }
 
 export async function getProviderSummaries(): Promise<ProviderSummary[]> {
@@ -324,8 +372,9 @@ export async function getProviderSummaries(): Promise<ProviderSummary[]> {
 }
 
 export async function testProvider(
+    providerId: string,
     capability: 'text' | 'vision',
     options: TestProviderOptions = {}
 ): Promise<ConnectionTestResult> {
-    return (await getDefaultService()).testProvider(capability, options);
+    return (await getDefaultService()).testProvider(providerId, capability, options);
 }

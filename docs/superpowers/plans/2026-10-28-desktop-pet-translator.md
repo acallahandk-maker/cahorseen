@@ -139,15 +139,15 @@ Run: `git add src/shared tests/unit && git commit -m "feat: add typed contracts 
 
 **Interfaces:**
 - Consumes: `ProviderConfig` from Task 2.
-- Produces: `saveProvider(config): Promise<void>`, `getProviderSummaries(): Promise<ProviderSummary[]>`, `testProvider(capability: "text" | "vision"): Promise<ConnectionTestResult>`, `translateText(request, signal): Promise<TranslationResult>`, `translateImage(request, signal): Promise<TranslationResult>`.
+- Produces: `saveProvider(config): Promise<ProviderSummary>`, `setActiveProvider(providerId: string): Promise<void>`, `getProviderSummaries(): Promise<ProviderSummary[]>`, `testProvider(providerId: string, capability: "text" | "vision"): Promise<ConnectionTestResult>`, `translateText(request, signal, onDelta?: (delta: string) => void): Promise<TranslationResult>`, `translateImage(request, signal, onDelta?: (delta: string) => void): Promise<TranslationResult>`.
 
 - [ ] **Step 1: Write failing tests for secrets and provider errors**
 
-Assert API keys are encrypted at rest and masked in summaries; empty/malformed/rate-limited/timeout responses return typed errors without response headers, keys, or secrets; abort signals cancel requests.
+Assert API keys are encrypted at rest and masked in summaries; HTTPS-only endpoints prevent plaintext secret transport; empty/malformed/rate-limited/timeout responses return typed errors without response headers, keys, or secrets; abort signals and timeout cover response-body consumption; request/output limits are enforced; streaming callbacks deliver incremental deltas; provider tests select persisted providers by ID.
 
 - [ ] **Step 2: Implement provider presets and OpenAI-compatible calls**
 
-Provide a Mimo preset with Base URL `https://token-plan-cn.xiaomimimo.com/v1` and a DeepSeek preset whose endpoint is editable until independently verified. Users can edit every Base URL and model. Validate Base URL, use bounded timeouts, and keep text and vision model IDs separate.
+Provide a Mimo preset with Base URL `https://token-plan-cn.xiaomimimo.com/v1` and a DeepSeek preset whose endpoint is editable until independently verified. Users can edit every HTTPS Base URL and model. Persist `activeProviderId`, use bounded timeouts and request/output limits, keep text and vision model IDs separate, and parse OpenAI-compatible SSE when streaming is enabled.
 
 - [ ] **Step 3: Run provider integration tests**
 

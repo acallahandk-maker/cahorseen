@@ -29,8 +29,48 @@ function jsonResponse(body: unknown, status = 200) {
 function bodyFromInit(init?: RequestInit) {
     return JSON.parse(String(init?.body)) as {
         model: string;
+        stream?: boolean;
         messages: Array<{ role: string; content: unknown }>;
     };
+}
+
+function delayedBodyResponse(delayMs: number, onCancel: () => void) {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+            timeout = setTimeout(() => {
+                controller.enqueue(new TextEncoder().encode(JSON.stringify({
+                    choices: [{ message: { content: 'delayed translation' } }]
+                })));
+                controller.close();
+            }, delayMs);
+        },
+        cancel() {
+            clearTimeout(timeout);
+            onCancel();
+        }
+    });
+    return new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+    });
+}
+
+function sseResponse(events: unknown[]) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+            for (const event of events) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            }
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+        }
+    });
+    return new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' }
+    });
 }
 
 describe('OpenAI-compatible translation client', () => {
@@ -92,6 +132,258 @@ describe('OpenAI-compatible translation client', () => {
         expect(requestBody?.messages.some((message) => {
             return JSON.stringify(message.content).includes('data:image/png;base64,AA==');
         })).toBe(true);
+    });
+
+    it('streams text deltas and returns the final translation', async () => {
+        let requestBody: ReturnType<typeof bodyFromInit> | undefined;
+        const deltas: string[] = [];
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => {
+                requestBody = bodyFromInit(init);
+                return sseResponse([
+                    { choices: [{ delta: { content: 'Bon' } }] },
+                    { choices: [{ delta: { content: 'jour' } }] }
+                ]);
+            }
+        });
+
+        const result = await client.translateText({
+            provider: { ...provider, streaming: true },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        }, undefined, (delta) => {
+            deltas.push(delta);
+        });
+
+        expect(result).toEqual({
+            translatedText: 'Bonjour',
+            model: 'synthetic-text-model'
+        });
+        expect(deltas).toEqual(['Bon', 'jour']);
+        expect(requestBody?.stream).toBe(true);
+    });
+
+    it('streams image deltas through the vision model', async () => {
+        let requestBody: ReturnType<typeof bodyFromInit> | undefined;
+        const deltas: string[] = [];
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => {
+                requestBody = bodyFromInit(init);
+                return sseResponse([
+                    { choices: [{ delta: { content: 'image ' } }] },
+                    { choices: [{ delta: { content: 'translation' } }] }
+                ]);
+            }
+        });
+
+        const result = await client.translateImage({
+            provider: { ...provider, streaming: true },
+            image: {
+                dataUrl: 'data:image/png;base64,AA==',
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+                byteLength: 1
+            },
+            targetLanguage: 'en'
+        }, undefined, (delta) => {
+            deltas.push(delta);
+        });
+
+        expect(result).toEqual({
+            translatedText: 'image translation',
+            model: 'synthetic-vision-model'
+        });
+        expect(deltas).toEqual(['image ', 'translation']);
+        expect(requestBody?.model).toBe('synthetic-vision-model');
+        expect(requestBody?.stream).toBe(true);
+    });
+
+    it('rejects streamed output above the exact limit before accepting the oversized delta', async () => {
+        const deltas: string[] = [];
+        let requestBody: ReturnType<typeof bodyFromInit> | undefined;
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => {
+                requestBody = bodyFromInit(init);
+                return sseResponse([
+                    { choices: [{ delta: { content: 'a'.repeat(16_001) } }] }
+                ]);
+            }
+        });
+
+        await expect(client.translateText({
+            provider: { ...provider, streaming: true },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        }, undefined, (delta) => {
+            deltas.push(delta);
+        })).rejects.toMatchObject({ code: 'invalid-response' });
+        expect(deltas).toEqual([]);
+        expect(requestBody?.stream).toBe(true);
+    });
+
+    it('returns typed errors for malformed streaming responses', async () => {
+        let requestBody: ReturnType<typeof bodyFromInit> | undefined;
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => {
+                requestBody = bodyFromInit(init);
+                return sseResponse([
+                    { choices: [{ delta: { content: 42 } }] }
+                ]);
+            }
+        });
+
+        await expect(client.translateText({
+            provider: { ...provider, streaming: true },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'invalid-response' });
+        expect(requestBody?.stream).toBe(true);
+    });
+
+    it('rejects plaintext HTTP endpoints before transmitting the API key', async () => {
+        let requestStarted = false;
+        const client = new OpenAiClient({
+            fetchImpl: async () => {
+                requestStarted = true;
+                return jsonResponse({
+                    choices: [{ message: { content: 'must not be reached' } }]
+                });
+            }
+        });
+
+        await expect(client.translateText({
+            provider: {
+                ...provider,
+                baseUrl: 'http://provider.example/v1'
+            },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'invalid-config' });
+        expect(requestStarted).toBe(false);
+    });
+
+    it.each([
+        {
+            name: 'source text',
+            request: {
+                sourceText: 'a'.repeat(32_001),
+                targetLanguage: 'fr'
+            }
+        },
+        {
+            name: 'context',
+            request: {
+                sourceText: 'hello',
+                context: 'a'.repeat(16_001),
+                targetLanguage: 'fr'
+            }
+        },
+        {
+            name: 'target language',
+            request: {
+                sourceText: 'hello',
+                targetLanguage: 'a'.repeat(65)
+            }
+        }
+    ])('rejects $name above its exact limit', async ({ request }) => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => jsonResponse({
+                choices: [{ message: { content: 'must not be reached' } }]
+            })
+        });
+
+        await expect(client.translateText({
+            provider,
+            ...request
+        })).rejects.toMatchObject({ code: 'invalid-config' });
+    });
+
+    it('rejects system prompts above the exact limit', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => jsonResponse({
+                choices: [{ message: { content: 'must not be reached' } }]
+            })
+        });
+
+        await expect(client.translateText({
+            provider: {
+                ...provider,
+                systemPrompt: 'a'.repeat(4_001)
+            },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'invalid-config' });
+    });
+
+    it('accepts source, context, system prompt, and target language at their exact limits', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => jsonResponse({
+                choices: [{ message: { content: 'ok' } }]
+            })
+        });
+
+        await expect(client.translateText({
+            provider: {
+                ...provider,
+                systemPrompt: 'a'.repeat(4_000)
+            },
+            sourceText: 'a'.repeat(32_000),
+            context: 'a'.repeat(16_000),
+            targetLanguage: 'a'.repeat(64)
+        })).resolves.toEqual({
+            translatedText: 'ok',
+            model: 'synthetic-text-model'
+        });
+    });
+
+    it('rejects non-streaming output above the exact limit', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => jsonResponse({
+                choices: [{ message: { content: 'a'.repeat(16_001) } }]
+            })
+        });
+
+        await expect(client.translateText({
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'invalid-response' });
+    });
+
+    it('keeps timeout active through response-body consumption', async () => {
+        let bodyCancelled = false;
+        const client = new OpenAiClient({
+            fetchImpl: async () => delayedBodyResponse(20, () => {
+                bodyCancelled = true;
+            })
+        });
+
+        await expect(client.translateText({
+            provider: { ...provider, timeoutMs: 5 },
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        })).rejects.toMatchObject({ code: 'timeout' });
+        expect(bodyCancelled).toBe(true);
+    });
+
+    it('keeps caller cancellation active through response-body consumption', async () => {
+        let bodyCancelled = false;
+        const client = new OpenAiClient({
+            fetchImpl: async () => delayedBodyResponse(20, () => {
+                bodyCancelled = true;
+            })
+        });
+        const controller = new AbortController();
+        const request = client.translateText({
+            provider,
+            sourceText: 'hello',
+            targetLanguage: 'fr'
+        }, controller.signal);
+        setTimeout(() => controller.abort(), 5);
+
+        await expect(request).rejects.toMatchObject({ code: 'aborted' });
+        expect(bodyCancelled).toBe(true);
     });
 
     it.each([

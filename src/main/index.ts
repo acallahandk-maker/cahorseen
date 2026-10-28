@@ -5,6 +5,7 @@ import { runSmokeModeIfEnabled } from './smokeMode';
 import {
     getProviderSummaries,
     saveProvider,
+    setActiveProvider,
     testProvider
 } from './services/secureConfig';
 
@@ -37,6 +38,7 @@ app.whenReady().then(() => {
         ipcMain,
         secureConfig: {
             saveProvider,
+            setActiveProvider,
             getProviderSummaries,
             testProvider
         }

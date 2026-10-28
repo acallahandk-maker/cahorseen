@@ -6,6 +6,23 @@ const positiveInteger = z.number().int().positive();
 const nonNegativeInteger = z.number().int().nonnegative();
 
 export const MAX_CAPTURED_IMAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_SOURCE_TEXT_CHARS = 32_000;
+export const MAX_CONTEXT_CHARS = 16_000;
+export const MAX_SYSTEM_PROMPT_CHARS = 4_000;
+export const MAX_TARGET_LANGUAGE_CHARS = 64;
+export const MAX_TRANSLATED_TEXT_CHARS = 16_000;
+
+function isHttpsUrl(value: string): boolean {
+    try {
+        return new URL(value).protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+const httpsUrl = z.string().url().refine(isHttpsUrl, {
+    message: 'Base URL must use HTTPS'
+});
 
 function decodedBase64ByteLength(payload: string): number | undefined {
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload))
@@ -51,7 +68,7 @@ export type MascotEvent = z.infer<typeof mascotEventSchema>;
 export const providerSummarySchema = z.strictObject({
     id: nonEmptyString,
     name: nonEmptyString,
-    baseUrl: z.string().url(),
+    baseUrl: httpsUrl,
     hasApiKey: z.boolean(),
     textModel: nonEmptyString,
     visionModel: nonEmptyString
@@ -60,12 +77,12 @@ export const providerSummarySchema = z.strictObject({
 export const providerConfigSchema = z.strictObject({
     id: nonEmptyString.optional(),
     name: nonEmptyString,
-    baseUrl: z.string().url(),
+    baseUrl: httpsUrl,
     apiKey: nonEmptyString,
     textModel: nonEmptyString,
     visionModel: nonEmptyString,
-    systemPrompt: z.string().optional(),
-    targetLanguage: nonEmptyString.optional(),
+    systemPrompt: z.string().max(MAX_SYSTEM_PROMPT_CHARS).optional(),
+    targetLanguage: nonEmptyString.max(MAX_TARGET_LANGUAGE_CHARS).optional(),
     timeoutMs: positiveInteger.optional(),
     streaming: z.boolean().optional()
 });
@@ -116,12 +133,37 @@ export const quizFeedbackSchema = z.strictObject({
     nextDueAt: timestamp
 });
 
-export const connectionTestResultSchema = z.strictObject({
-    capability: z.enum(['text', 'vision']),
-    success: z.boolean(),
-    message: z.string(),
-    latencyMs: nonNegativeInteger.optional()
-});
+export const providerErrorCodeSchema = z.enum([
+    'invalid-config',
+    'invalid-response',
+    'authentication',
+    'rate-limited',
+    'timeout',
+    'aborted',
+    'network',
+    'server',
+    'invalid-storage',
+    'provider-not-found',
+    'storage-unavailable',
+    'storage-error'
+]);
+
+const connectionTestCapabilitySchema = z.enum(['text', 'vision']);
+export const connectionTestResultSchema = z.discriminatedUnion('success', [
+    z.strictObject({
+        capability: connectionTestCapabilitySchema,
+        success: z.literal(true),
+        message: z.string(),
+        latencyMs: nonNegativeInteger.optional()
+    }),
+    z.strictObject({
+        capability: connectionTestCapabilitySchema,
+        success: z.literal(false),
+        message: z.string(),
+        errorCode: providerErrorCodeSchema,
+        latencyMs: nonNegativeInteger.optional()
+    })
+]);
 
 export const selectionCaptureSchema = z.strictObject({
     sourceText: nonEmptyString,
@@ -241,6 +283,7 @@ export type MemoryEntry = z.infer<typeof memoryEntrySchema>;
 export type QuizQuestion = z.infer<typeof quizQuestionSchema>;
 export type QuizFeedback = z.infer<typeof quizFeedbackSchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
+export type ProviderErrorCode = z.infer<typeof providerErrorCodeSchema>;
 export type SelectionCapture = z.infer<typeof selectionCaptureSchema>;
 export type ScreenBounds = z.infer<typeof screenBoundsSchema>;
 export type CapturedImage = z.infer<typeof capturedImageSchema>;
