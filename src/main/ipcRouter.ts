@@ -7,6 +7,8 @@ import {
     providerErrorCodeSchema,
     providerConfigSchema,
     providerSummarySchema,
+    screenshotIpcChannels,
+    screenshotTranslationStartSchema,
     translationCancelSchema,
     translationEventSchema,
     translationIpcChannels,
@@ -15,6 +17,7 @@ import {
     type ProviderErrorCode,
     type ProviderConfig,
     type ProviderSummary,
+    type ScreenBounds,
     type SelectionCapture,
     type TranslationError,
     type TranslationTask
@@ -25,6 +28,7 @@ import {
     validateProviderConfig
 } from './services/openAiClient';
 import type { SelectionTranslationOptions } from './services/selectionService';
+import type { ScreenshotTranslationOptions } from './services/screenshotService';
 
 export const providerIpcChannels = {
     save: 'desktop-pet:provider-save',
@@ -48,6 +52,13 @@ export interface SelectionIpcService {
     translateSelection(options?: SelectionTranslationOptions): Promise<TranslationTask>;
 }
 
+export interface ScreenshotIpcService {
+    translateScreenshot(
+        bounds: ScreenBounds,
+        options?: ScreenshotTranslationOptions
+    ): Promise<TranslationTask>;
+}
+
 export interface IpcMainLike {
     handle(channel: string, listener: (event: unknown, payload?: unknown) => unknown): void;
     removeHandler(channel: string): void;
@@ -57,6 +68,7 @@ export interface RegisterIpcRouterOptions {
     ipcMain: IpcMainLike;
     secureConfig: ProviderIpcService;
     selection?: SelectionIpcService;
+    screenshot?: ScreenshotIpcService;
     isSenderAuthorized?: (event: unknown) => boolean;
 }
 
@@ -164,7 +176,7 @@ function taskFailure(task: TranslationTask): IpcFailure['error'] {
 }
 
 export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void {
-    const { ipcMain, secureConfig, selection } = options;
+    const { ipcMain, secureConfig, selection, screenshot } = options;
     const isSenderAuthorized = options.isSenderAuthorized ?? defaultIsSenderAuthorized;
     const activeTasks = new Map<string, AbortController>();
 
@@ -318,6 +330,60 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             }
         });
 
+    }
+
+    if (screenshot !== undefined) {
+        ipcMain.handle(screenshotIpcChannels.translate, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = screenshotTranslationStartSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Screenshot translation request is invalid.');
+
+            const controller = new AbortController();
+            const taskId = randomUUID();
+            activeTasks.set(taskId, controller);
+            const onTaskId = (startedTaskId: string): void => {
+                if (startedTaskId === taskId) {
+                    sendEvent(event, {
+                        type: 'started',
+                        taskId
+                    });
+                }
+            };
+            try {
+                const task = await screenshot.translateScreenshot(parsed.data.bounds, {
+                    taskId,
+                    signal: controller.signal,
+                    onTaskId
+                });
+                if (task.status === 'completed') {
+                    sendEvent(event, { type: 'completed', task });
+                    return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
+                }
+                const error = taskFailure(task);
+                sendEvent(event, { type: 'failed', taskId, error });
+                return {
+                    ok: false,
+                    error
+                };
+            } catch (error) {
+                const result = controller.signal.aborted
+                    ? failure('aborted', providerErrorMessage('aborted'))
+                    : safeFailure(error);
+                sendEvent(event, {
+                    type: 'failed',
+                    taskId,
+                    error: result.error
+                });
+                return result;
+            } finally {
+                activeTasks.delete(taskId);
+            }
+        });
+    }
+
+    if (selection !== undefined || screenshot !== undefined) {
         ipcMain.handle(translationIpcChannels.cancel, async (event, payload) => {
             if (!isSenderAuthorized(event))
                 return failure('unauthorized', 'IPC sender is not authorized.');
@@ -339,6 +405,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         ipcMain.removeHandler(providerIpcChannels.test);
         ipcMain.removeHandler(translationIpcChannels.captureSelection);
         ipcMain.removeHandler(translationIpcChannels.translateSelection);
+        ipcMain.removeHandler(screenshotIpcChannels.translate);
         ipcMain.removeHandler(translationIpcChannels.cancel);
         for (const controller of activeTasks.values())
             controller.abort();

@@ -28,6 +28,9 @@ import { getActiveProviderConfig } from './secureConfig';
 export type { ImageTranslationRunner };
 export { UnsupportedVisionError };
 
+export const MAX_CAPTURE_SOURCE_BYTES = 128 * 1024 * 1024;
+export const MAX_CAPTURE_MEMORY_BYTES = 320 * 1024 * 1024;
+
 export interface EncodedScreenshot {
     data: Buffer;
     mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
@@ -35,8 +38,14 @@ export interface EncodedScreenshot {
     height: number;
 }
 
+export interface CaptureSegment {
+    source: ScreenBounds;
+    destination: ScreenBounds;
+}
+
 export interface ScreenshotCaptureRequest {
     bounds: ScreenBounds;
+    segments: CaptureSegment[];
     width: number;
     height: number;
     mimeType: 'image/jpeg';
@@ -51,9 +60,10 @@ export interface ScreenshotServiceOptions {
     captureAdapter: ScreenshotCaptureAdapter;
     translationRunner: ImageTranslationRunner;
     getProvider(): Promise<ProviderConfig>;
-    getCaptureBounds(): ScreenBounds;
-    mapBoundsToCapturePixels(bounds: ScreenBounds): ScreenBounds;
+    getDisplays(): ScreenBounds[];
+    mapBoundsToCapturePixels(displayIndex: number, bounds: ScreenBounds): ScreenBounds;
     maxDimension?: number;
+    maxSourceBytes?: number;
     createId?: () => string;
 }
 
@@ -140,6 +150,102 @@ function scaledDimensions(bounds: ScreenBounds, maxDimension: number): {
     };
 }
 
+function targetRect(
+    source: ScreenBounds,
+    clippingBounds: ScreenBounds,
+    output: { width: number; height: number }
+): ScreenBounds {
+    const left = Math.round(
+        ((source.x - clippingBounds.x) / clippingBounds.width) * output.width
+    );
+    const top = Math.round(
+        ((source.y - clippingBounds.y) / clippingBounds.height) * output.height
+    );
+    const right = Math.round(
+        ((source.x + source.width - clippingBounds.x) / clippingBounds.width)
+        * output.width
+    );
+    const bottom = Math.round(
+        ((source.y + source.height - clippingBounds.y) / clippingBounds.height)
+        * output.height
+    );
+    return {
+        x: left,
+        y: top,
+        width: Math.max(1, right - left),
+        height: Math.max(1, bottom - top)
+    };
+}
+
+function tileSegments(
+    mapped: ScreenBounds,
+    destination: ScreenBounds,
+    maxSourceBytes: number
+): CaptureSegment[] {
+    const maximumPixels = Math.max(1, Math.floor(maxSourceBytes / 4));
+    const tileDimension = Math.max(1, Math.floor(Math.sqrt(maximumPixels)));
+    const segments: CaptureSegment[] = [];
+    for (let sourceY = 0; sourceY < mapped.height; sourceY += tileDimension) {
+        const sourceHeight = Math.min(tileDimension, mapped.height - sourceY);
+        for (let sourceX = 0; sourceX < mapped.width; sourceX += tileDimension) {
+            const sourceWidth = Math.min(tileDimension, mapped.width - sourceX);
+            const destinationLeft = destination.x + Math.round(
+                (sourceX / mapped.width) * destination.width
+            );
+            const destinationTop = destination.y + Math.round(
+                (sourceY / mapped.height) * destination.height
+            );
+            const destinationRight = destination.x + Math.round(
+                ((sourceX + sourceWidth) / mapped.width) * destination.width
+            );
+            const destinationBottom = destination.y + Math.round(
+                ((sourceY + sourceHeight) / mapped.height) * destination.height
+            );
+            segments.push({
+                source: {
+                    x: mapped.x + sourceX,
+                    y: mapped.y + sourceY,
+                    width: sourceWidth,
+                    height: sourceHeight
+                },
+                destination: {
+                    x: destinationLeft,
+                    y: destinationTop,
+                    width: Math.max(1, destinationRight - destinationLeft),
+                    height: Math.max(1, destinationBottom - destinationTop)
+                }
+            });
+        }
+    }
+    return segments;
+}
+
+function buildCaptureSegments(
+    clippedBounds: ScreenBounds,
+    displays: ScreenBounds[],
+    mapBoundsToCapturePixels: (displayIndex: number, bounds: ScreenBounds) => ScreenBounds,
+    output: { width: number; height: number },
+    maxSourceBytes: number
+): CaptureSegment[] {
+    const segments: CaptureSegment[] = [];
+    displays.forEach((display, displayIndex) => {
+        const displayRegion = intersectBounds(clippedBounds, display);
+        if (displayRegion === undefined)
+            return;
+        const mapped = mapBoundsToCapturePixels(displayIndex, displayRegion);
+        if (!screenBoundsSchema.safeParse(mapped).success)
+            throw new ScreenshotError('invalid-bounds');
+        segments.push(...tileSegments(
+            mapped,
+            targetRect(displayRegion, clippedBounds, output),
+            maxSourceBytes
+        ));
+    });
+    if (segments.length === 0)
+        throw new ScreenshotError('invalid-bounds');
+    return segments;
+}
+
 function safeTaskErrorCode(error: unknown): TranslationErrorCode {
     if (error instanceof ScreenshotError && error.code === 'unsupported-vision')
         return error.code;
@@ -178,6 +284,11 @@ function validateCaptureRequest(request: ScreenshotCaptureRequest): void {
     const parsed = screenBoundsSchema.safeParse(request.bounds);
     if (
         !parsed.success
+        || request.segments.length === 0
+        || request.segments.some((segment) => (
+            !screenBoundsSchema.safeParse(segment.source).success
+            || !screenBoundsSchema.safeParse(segment.destination).success
+        ))
         || !Number.isInteger(request.width)
         || !Number.isInteger(request.height)
         || request.width < 1
@@ -190,22 +301,35 @@ export class ScreenshotService {
     private readonly captureAdapter: ScreenshotCaptureAdapter;
     private readonly translationRunner: ImageTranslationRunner;
     private readonly getProvider: () => Promise<ProviderConfig>;
-    private readonly getCaptureBounds: () => ScreenBounds;
-    private readonly mapBoundsToCapturePixels: (bounds: ScreenBounds) => ScreenBounds;
+    private readonly getDisplays: () => ScreenBounds[];
+    private readonly mapBoundsToCapturePixels: (
+        displayIndex: number,
+        bounds: ScreenBounds
+    ) => ScreenBounds;
     private readonly maxDimension: number;
+    private readonly maxSourceBytes: number;
     private readonly createId: () => string;
     private readonly captures = new Set<CapturedImage>();
+    private captureQueue: Promise<void> = Promise.resolve();
 
     constructor(options: ScreenshotServiceOptions) {
         const maxDimension = options.maxDimension ?? 1600;
+        const maxSourceBytes = options.maxSourceBytes ?? MAX_CAPTURE_SOURCE_BYTES;
         if (!Number.isInteger(maxDimension) || maxDimension < 1 || maxDimension > 4096)
             throw new ScreenshotError('invalid-bounds');
+        if (
+            !Number.isInteger(maxSourceBytes)
+            || maxSourceBytes < 4
+            || maxSourceBytes > MAX_CAPTURE_SOURCE_BYTES
+        )
+            throw new ScreenshotError('image-too-large');
         this.captureAdapter = options.captureAdapter;
         this.translationRunner = options.translationRunner;
         this.getProvider = options.getProvider;
-        this.getCaptureBounds = options.getCaptureBounds;
+        this.getDisplays = options.getDisplays;
         this.mapBoundsToCapturePixels = options.mapBoundsToCapturePixels;
         this.maxDimension = maxDimension;
+        this.maxSourceBytes = maxSourceBytes;
         this.createId = options.createId ?? randomUUID;
     }
 
@@ -214,21 +338,62 @@ export class ScreenshotService {
     }
 
     async captureRegion(bounds: ScreenBounds, signal?: AbortSignal): Promise<CapturedImage> {
-        validateCaptureRequest({
-            bounds,
-            width: 1,
-            height: 1,
-            mimeType: 'image/jpeg'
-        });
+        const capture = this.captureQueue.then(() => this.captureRegionNow(bounds, signal));
+        this.captureQueue = capture.then(() => undefined, () => undefined);
+        return capture;
+    }
+
+    private async captureRegionNow(
+        bounds: ScreenBounds,
+        signal?: AbortSignal
+    ): Promise<CapturedImage> {
+        if (!screenBoundsSchema.safeParse(bounds).success)
+            throw new ScreenshotError('invalid-bounds');
         if (signal?.aborted === true)
             throw new ScreenshotError('aborted');
-        const clippedBounds = intersectBounds(bounds, this.getCaptureBounds());
-        if (clippedBounds === undefined)
+        const displays = this.getDisplays();
+        if (!Array.isArray(displays) || displays.length === 0)
             throw new ScreenshotError('invalid-bounds');
+        const clippedDisplays = displays
+            .map((display) => intersectBounds(bounds, display))
+            .filter((display): display is ScreenBounds => display !== undefined);
+        if (clippedDisplays.length === 0)
+            throw new ScreenshotError('invalid-bounds');
+        const left = Math.min(...clippedDisplays.map((display) => display.x));
+        const top = Math.min(...clippedDisplays.map((display) => display.y));
+        const right = Math.max(...clippedDisplays.map((
+            display
+        ) => display.x + display.width));
+        const bottom = Math.max(...clippedDisplays.map((
+            display
+        ) => display.y + display.height));
+        const clippedBounds = {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top
+        };
 
         const dimensions = scaledDimensions(clippedBounds, this.maxDimension);
+        const segments = buildCaptureSegments(
+            clippedBounds,
+            displays,
+            this.mapBoundsToCapturePixels,
+            dimensions,
+            this.maxSourceBytes
+        );
+        const targetBytes = dimensions.width * dimensions.height * 4;
+        const maximumSourceBytes = Math.max(...segments.map((segment) => (
+            segment.source.width * segment.source.height * 4
+        )));
+        if (
+            targetBytes + maximumSourceBytes + MAX_CAPTURED_IMAGE_BYTES * 2
+            > MAX_CAPTURE_MEMORY_BYTES
+        )
+            throw new ScreenshotError('image-too-large');
         const captureRequest: ScreenshotCaptureRequest = {
-            bounds: this.mapBoundsToCapturePixels(clippedBounds),
+            bounds: clippedBounds,
+            segments,
             width: dimensions.width,
             height: dimensions.height,
             mimeType: 'image/jpeg',
@@ -370,20 +535,27 @@ function runPowerShell(script: string, signal?: AbortSignal): Promise<string> {
 }
 
 function captureScript(request: ScreenshotCaptureRequest): string {
+    const segmentCommands = request.segments.flatMap((segment) => [
+        '  $source = New-Object System.Drawing.Bitmap ' + segment.source.width + ', ' + segment.source.height,
+        '  $sourceGraphics = [System.Drawing.Graphics]::FromImage($source)',
+        '  try {',
+        '    $sourceGraphics.CopyFromScreen(' + segment.source.x + ', ' + segment.source.y + ', 0, 0, $source.Size)',
+        '    $targetGraphics.DrawImage($source, ' + segment.destination.x + ', ' + segment.destination.y + ', ' + segment.destination.width + ', ' + segment.destination.height + ')',
+        '  } finally {',
+        '    $sourceGraphics.Dispose()',
+        '    $source.Dispose()',
+        '  }'
+    ]);
     return [
         'Add-Type -AssemblyName System.Drawing',
-        'Add-Type -AssemblyName System.Windows.Forms',
         'Add-Type -TypeDefinition "using System.Runtime.InteropServices; public static class DesktopPetDpi { [DllImport(\\"user32.dll\\")] public static extern bool SetProcessDPIAware(); }"',
         '[DesktopPetDpi]::SetProcessDPIAware() | Out-Null',
-        '$source = New-Object System.Drawing.Bitmap ' + request.bounds.width + ', ' + request.bounds.height,
         '$target = New-Object System.Drawing.Bitmap ' + request.width + ', ' + request.height,
-        '$sourceGraphics = [System.Drawing.Graphics]::FromImage($source)',
         '$targetGraphics = [System.Drawing.Graphics]::FromImage($target)',
         '$memory = New-Object System.IO.MemoryStream',
         'try {',
-        '  $sourceGraphics.CopyFromScreen(' + request.bounds.x + ', ' + request.bounds.y + ', 0, 0, $source.Size)',
         '  $targetGraphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic',
-        '  $targetGraphics.DrawImage($source, 0, 0, ' + request.width + ', ' + request.height + ')',
+        ...segmentCommands,
         '  $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq "image/jpeg" }',
         '  $parameters = New-Object System.Drawing.Imaging.EncoderParameters(1)',
         '  $parameters.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]85)',
@@ -392,9 +564,7 @@ function captureScript(request: ScreenshotCaptureRequest): string {
         '} finally {',
         '  $memory.Dispose()',
         '  $targetGraphics.Dispose()',
-        '  $sourceGraphics.Dispose()',
         '  $target.Dispose()',
-        '  $source.Dispose()',
         '}'
     ].join('\n');
 }
@@ -427,24 +597,10 @@ async function getDefaultService(): Promise<ScreenshotService> {
                 workerPath: join(__dirname, 'translationWorker.js')
             }),
             getProvider: getActiveProviderConfig,
-            getCaptureBounds: () => {
-                const displays = screen.getAllDisplays();
-                const left = Math.min(...displays.map((display) => display.bounds.x));
-                const top = Math.min(...displays.map((display) => display.bounds.y));
-                const right = Math.max(...displays.map((
-                    display
-                ) => display.bounds.x + display.bounds.width));
-                const bottom = Math.max(...displays.map((
-                    display
-                ) => display.bounds.y + display.bounds.height));
-                return {
-                    x: left,
-                    y: top,
-                    width: right - left,
-                    height: bottom - top
-                };
-            },
-            mapBoundsToCapturePixels: (bounds) => screen.dipToScreenRect(null, bounds)
+            getDisplays: () => screen.getAllDisplays().map((display) => display.bounds),
+            mapBoundsToCapturePixels: (_displayIndex, bounds) => (
+                screen.dipToScreenRect(null, bounds)
+            )
         });
     }
     return defaultService;
@@ -455,9 +611,10 @@ export async function captureRegion(bounds: ScreenBounds): Promise<CapturedImage
 }
 
 export async function translateScreenshot(
-    bounds: ScreenBounds
+    bounds: ScreenBounds,
+    options?: ScreenshotTranslationOptions
 ): Promise<TranslationTask> {
-    return (await getDefaultService()).translateScreenshot(bounds);
+    return (await getDefaultService()).translateScreenshot(bounds, options);
 }
 
 export function disposeCapturedImage(image: CapturedImage): void {

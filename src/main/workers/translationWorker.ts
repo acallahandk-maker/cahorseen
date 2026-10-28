@@ -115,6 +115,7 @@ function toProviderErrorCode(code: z.infer<typeof translationErrorCodeSchema>): 
     return code === 'aborted'
         || code === 'authentication'
         || code === 'invalid-config'
+        || code === 'invalid-request'
         || code === 'invalid-response'
         || code === 'invalid-storage'
         || code === 'network'

@@ -24,9 +24,11 @@ export const MAX_PROVIDER_TIMEOUT_MS = 120_000;
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
 export const MAX_NON_STREAMING_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_STREAMING_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_PROVIDER_ERROR_RESPONSE_BYTES = 64 * 1024;
 
 const providerErrorMessages: Record<ProviderErrorCode, string> = {
     'invalid-config': 'Provider configuration is invalid.',
+    'invalid-request': 'Provider request is invalid.',
     'invalid-response': 'Provider returned an invalid response.',
     authentication: 'Provider authentication failed.',
     'rate-limited': 'Provider rate limit exceeded.',
@@ -183,7 +185,62 @@ function errorForStatus(status: number): ProviderErrorCode {
         return 'timeout';
     if (status === 429)
         return 'rate-limited';
+    if (status === 400 || status === 422)
+        return 'invalid-request';
     return 'server';
+}
+
+async function providerErrorPattern(
+    response: Response,
+    signal: AbortSignal
+): Promise<string> {
+    try {
+        const body = await readBodyWithAbort(
+            response,
+            signal,
+            MAX_PROVIDER_ERROR_RESPONSE_BYTES
+        );
+        let payload: unknown;
+        try {
+            payload = JSON.parse(body);
+        } catch {
+            return body.slice(0, 2_048).toLowerCase();
+        }
+        if (typeof payload !== 'object' || payload === null)
+            return '';
+        const error = (payload as { error?: unknown }).error;
+        const source = typeof error === 'object' && error !== null
+            ? error
+            : payload;
+        const code = (source as { code?: unknown }).code;
+        const message = (source as { message?: unknown }).message;
+        return [
+            typeof code === 'string' ? code : '',
+            typeof message === 'string' ? message : ''
+        ].join(' ').trim().slice(0, 2_048).toLowerCase();
+    } catch (error) {
+        if (error instanceof RequestAbortedError)
+            throw error;
+        return '';
+    }
+}
+
+function isUnsupportedVisionFailure(status: number, pattern: string): boolean {
+    if (status !== 400 && status !== 404)
+        return false;
+    const recognizedCodes = new Set([
+        'model_not_found',
+        'model_not_found_error',
+        'image_input_not_supported',
+        'image_url_unsupported',
+        'unsupported_image_input',
+        'invalid_multimodal_input'
+    ]);
+    const code = pattern.split(/\s+/, 1)[0];
+    if (recognizedCodes.has(code))
+        return true;
+    return /\b(model (?:is )?not found|model (?:does not exist|not available)|does not support (?:image|vision|multimodal)|image (?:input|url) (?:is )?(?:unsupported|not supported)|vision (?:input )?(?:is )?(?:unsupported|not supported)|invalid (?:image|multimodal) input)\b/
+        .test(pattern);
 }
 
 class RequestAbortedError extends Error {
@@ -537,13 +594,17 @@ export class OpenAiClient {
                     }
                 );
 
-                if (
-                    capability === 'vision'
-                    && (response.status === 400 || response.status === 404)
-                )
-                    throw new UnsupportedVisionError();
-                if (!response.ok)
+                if (!response.ok) {
+                    if (capability === 'vision') {
+                        const pattern = await providerErrorPattern(
+                            response,
+                            requestSignal
+                        );
+                        if (isUnsupportedVisionFailure(response.status, pattern))
+                            throw new UnsupportedVisionError();
+                    }
                     throw new ProviderError(errorForStatus(response.status));
+                }
 
                 if (body.stream) {
                     return {

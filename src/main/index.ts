@@ -5,7 +5,11 @@ import {
     captureSelectionOnce,
     translateSelection
 } from './services/selectionService';
-import { registerSelectionShortcut } from './selectionShortcut';
+import { translateScreenshot } from './services/screenshotService';
+import {
+    registerScreenshotShortcut,
+    registerSelectionShortcut
+} from './selectionShortcut';
 import { runSmokeModeIfEnabled } from './smokeMode';
 import {
     getProviderSummaries,
@@ -13,7 +17,10 @@ import {
     setActiveProvider,
     testProvider
 } from './services/secureConfig';
-import { translationIpcChannels } from '../shared/contracts';
+import {
+    screenshotIpcChannels,
+    translationIpcChannels
+} from '../shared/contracts';
 
 const pingChannel = 'desktop-pet:ping';
 
@@ -51,6 +58,9 @@ app.whenReady().then(() => {
         selection: {
             captureSelectionOnce,
             translateSelection
+        },
+        screenshot: {
+            translateScreenshot
         }
     });
     const disposeSelectionShortcut = registerSelectionShortcut({
@@ -61,6 +71,14 @@ app.whenReady().then(() => {
         }
     });
     app.on('will-quit', disposeSelectionShortcut);
+    const disposeScreenshotShortcut = registerScreenshotShortcut({
+        shortcut: globalShortcut,
+        onTrigger: () => {
+            for (const window of BrowserWindow.getAllWindows())
+                window.webContents.send(screenshotIpcChannels.shortcut);
+        }
+    });
+    app.on('will-quit', disposeScreenshotShortcut);
     const window = createWindow();
     if (runSmokeModeIfEnabled(window))
         return;

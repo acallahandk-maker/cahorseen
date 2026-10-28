@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
     selectionCaptureSchema,
+    screenshotIpcChannels,
+    screenshotTranslationStartSchema,
     translationAckSchema,
     translationCancelSchema,
     translationErrorSchema,
@@ -10,6 +12,7 @@ import {
     translationStartSchema,
     translationTaskSchema,
     type SelectionCapture,
+    type ScreenBounds,
     type TranslationEvent,
     type TranslationTask
 } from '../shared/contracts';
@@ -35,9 +38,11 @@ export interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
     captureSelectionOnce: () => Promise<SelectionCapture>;
     translateSelection: () => Promise<TranslationTask>;
+    translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     cancelTranslation: (taskId: string) => Promise<void>;
     onTranslationEvent: (listener: (event: TranslationEvent) => void) => () => void;
     onSelectionShortcut: (listener: () => void) => () => void;
+    onScreenshotShortcut: (listener: () => void) => () => void;
 }
 
 function parseResult<T>(
@@ -70,6 +75,13 @@ const desktopPetApi: DesktopPetApi = {
             await ipcRenderer.invoke(translationIpcChannels.translateSelection, request)
         );
     },
+    translateScreenshot: async (bounds) => {
+        const request = screenshotTranslationStartSchema.parse({ bounds });
+        return parseResult(
+            translationTaskSchema,
+            await ipcRenderer.invoke(screenshotIpcChannels.translate, request)
+        );
+    },
     cancelTranslation: async (taskId) => {
         const request = translationCancelSchema.parse({ taskId });
         parseAck(await ipcRenderer.invoke(translationIpcChannels.cancel, request));
@@ -91,6 +103,18 @@ const desktopPetApi: DesktopPetApi = {
         return () => {
             ipcRenderer.removeListener(
                 translationIpcChannels.selectionShortcut,
+                channelListener
+            );
+        };
+    },
+    onScreenshotShortcut: (listener) => {
+        const channelListener = (): void => {
+            listener();
+        };
+        ipcRenderer.on(screenshotIpcChannels.shortcut, channelListener);
+        return () => {
+            ipcRenderer.removeListener(
+                screenshotIpcChannels.shortcut,
                 channelListener
             );
         };

@@ -12,6 +12,7 @@ import {
     quizQuestionSchema,
     screenBoundsSchema,
     selectionCaptureSchema,
+    screenshotTranslationStartSchema,
     translationTaskSchema
 } from '../../src/shared/contracts';
 
@@ -194,6 +195,29 @@ describe('shared contracts', () => {
 
     it('exports the captured image byte limit', () => {
         expect(MAX_CAPTURED_IMAGE_BYTES).toBe(8 * 1024 * 1024);
+    });
+
+    it('validates screenshot translation region IPC payloads strictly', () => {
+        const payload = {
+            bounds: {
+                x: -10,
+                y: 20,
+                width: 300,
+                height: 180
+            }
+        };
+
+        expect(screenshotTranslationStartSchema.parse(payload)).toEqual(payload);
+        expect(screenshotTranslationStartSchema.safeParse({
+            ...payload,
+            sourceText: 'not allowed'
+        }).success).toBe(false);
+        expect(screenshotTranslationStartSchema.safeParse({
+            bounds: {
+                ...payload.bounds,
+                width: 0
+            }
+        }).success).toBe(false);
     });
 
     it('rejects inconsistent or oversized captured image payloads', () => {

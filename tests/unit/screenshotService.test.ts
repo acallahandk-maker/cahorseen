@@ -10,7 +10,8 @@ import {
     ScreenshotService,
     disposeCapturedImage,
     type EncodedScreenshot,
-    type ScreenshotCaptureAdapter
+    type ScreenshotCaptureAdapter,
+    type ScreenshotCaptureRequest
 } from '../../src/main/services/screenshotService';
 
 const provider: ProviderConfig = {
@@ -68,8 +69,8 @@ function service(
         captureAdapter,
         translationRunner,
         getProvider: async () => provider,
-        getCaptureBounds: () => ({ x: 0, y: 0, width: 100, height: 80 }),
-        mapBoundsToCapturePixels: (bounds) => bounds,
+        getDisplays: () => [{ x: 0, y: 0, width: 100, height: 80 }],
+        mapBoundsToCapturePixels: (_displayIndex, bounds) => bounds,
         maxDimension,
         createId: () => 'screenshot-task'
     });
@@ -81,19 +82,137 @@ afterEach(() => {
 
 describe('ScreenshotService', () => {
     it('clips and downscales only the requested screenshot region', async () => {
-        const captureClippedRegion = vi.fn(async () => imageResult(50, 35));
+        const captureClippedRegion = vi.fn(async (
+            request: ScreenshotCaptureRequest
+        ) => imageResult(request.width, request.height));
         const testService = service({ captureClippedRegion }, runner(), 50);
 
         await testService.captureRegion({ x: -20, y: 10, width: 140, height: 100 });
 
-        expect(captureClippedRegion).toHaveBeenCalledWith({
-            bounds: { x: 0, y: 10, width: 100, height: 70 },
-            width: 50,
-            height: 35,
-            mimeType: 'image/jpeg',
-            signal: undefined
-        });
+        expect(captureClippedRegion).toHaveBeenCalledTimes(1);
+        const request = captureClippedRegion.mock.calls[0][0];
+        expect(request.bounds).toEqual({ x: 0, y: 10, width: 100, height: 70 });
+        expect(request.width).toBe(50);
+        expect(request.height).toBe(35);
+        expect(request.segments).toEqual([{
+            source: { x: 0, y: 10, width: 100, height: 70 },
+            destination: { x: 0, y: 0, width: 50, height: 35 }
+        }]);
         expect(testService.activeCaptureCount()).toBe(1);
+    });
+
+    it('maps mixed-DPI displays per display and composites only selected segments', async () => {
+        const captureClippedRegion = vi.fn(async (
+            request: ScreenshotCaptureRequest
+        ) => imageResult(request.width, request.height));
+        const testService = new ScreenshotService({
+            captureAdapter: { captureClippedRegion },
+            translationRunner: runner(),
+            getProvider: async () => provider,
+            getDisplays: () => [
+                { x: 0, y: 0, width: 100, height: 100 },
+                { x: 100, y: 0, width: 100, height: 100 }
+            ],
+            mapBoundsToCapturePixels: (displayIndex, bounds) => displayIndex === 0
+                ? bounds
+                : {
+                    x: bounds.x * 2,
+                    y: bounds.y * 2,
+                    width: bounds.width * 2,
+                    height: bounds.height * 2
+                },
+            maxDimension: 80,
+            createId: () => 'screenshot-task'
+        });
+
+        await testService.captureRegion({ x: 50, y: 0, width: 80, height: 10 });
+
+        const request = captureClippedRegion.mock.calls[0][0];
+        expect(request.segments.map((segment) => segment.source)).toEqual([
+            { x: 50, y: 0, width: 50, height: 10 },
+            { x: 200, y: 0, width: 60, height: 20 }
+        ]);
+        expect(request.segments.map((segment) => segment.destination)).toEqual([
+            { x: 0, y: 0, width: 50, height: 10 },
+            { x: 50, y: 0, width: 30, height: 10 }
+        ]);
+    });
+
+    it('does not allocate source pixels for separated-monitor gaps', async () => {
+        const captureClippedRegion = vi.fn(async (
+            request: ScreenshotCaptureRequest
+        ) => imageResult(request.width, request.height));
+        const testService = new ScreenshotService({
+            captureAdapter: { captureClippedRegion },
+            translationRunner: runner(),
+            getProvider: async () => provider,
+            getDisplays: () => [
+                { x: 0, y: 0, width: 100, height: 100 },
+                { x: 200, y: 0, width: 100, height: 100 }
+            ],
+            mapBoundsToCapturePixels: (_displayIndex, value) => value,
+            maxDimension: 200,
+            createId: () => 'screenshot-task'
+        });
+
+        await testService.captureRegion({ x: 50, y: 0, width: 200, height: 50 });
+
+        const request = captureClippedRegion.mock.calls[0][0];
+        expect(request.segments.map((segment) => segment.source)).toEqual([
+            { x: 50, y: 0, width: 50, height: 50 },
+            { x: 200, y: 0, width: 50, height: 50 }
+        ]);
+    });
+
+    it('tiles oversized source regions to enforce the raw-pixel budget', async () => {
+        const captureClippedRegion = vi.fn(async (
+            request: ScreenshotCaptureRequest
+        ) => imageResult(request.width, request.height));
+        const testService = new ScreenshotService({
+            captureAdapter: { captureClippedRegion },
+            translationRunner: runner(),
+            getProvider: async () => provider,
+            getDisplays: () => [{ x: 0, y: 0, width: 20, height: 10 }],
+            mapBoundsToCapturePixels: (_displayIndex, bounds) => bounds,
+            maxDimension: 20,
+            maxSourceBytes: 4 * 5 * 5,
+            createId: () => 'screenshot-task'
+        });
+
+        await testService.captureRegion({ x: 0, y: 0, width: 20, height: 10 });
+
+        const request = captureClippedRegion.mock.calls[0][0];
+        expect(request.segments.length).toBeGreaterThan(1);
+        expect(request.segments.every((segment) => (
+            segment.source.width * segment.source.height * 4 <= 4 * 5 * 5
+        ))).toBe(true);
+    });
+
+    it('serializes capture requests before allocating source buffers', async () => {
+        const pending: Array<() => void> = [];
+        let active = 0;
+        let maximumActive = 0;
+        const captureClippedRegion = vi.fn(async (
+            request: ScreenshotCaptureRequest
+        ) => {
+            active += 1;
+            maximumActive = Math.max(maximumActive, active);
+            await new Promise<void>((resolve) => pending.push(resolve));
+            active -= 1;
+            return imageResult(request.width, request.height);
+        });
+        const testService = service({ captureClippedRegion });
+
+        const first = testService.captureRegion({ x: 0, y: 0, width: 10, height: 10 });
+        const second = testService.captureRegion({ x: 0, y: 0, width: 10, height: 10 });
+        await vi.waitFor(() => expect(captureClippedRegion).toHaveBeenCalledTimes(1));
+        pending.shift()?.();
+        await first;
+        await vi.waitFor(() => expect(captureClippedRegion).toHaveBeenCalledTimes(2));
+        pending.shift()?.();
+        await second;
+
+        expect(maximumActive).toBe(1);
     });
 
     it('enforces captured image byte limits and disposes oversized buffers', async () => {

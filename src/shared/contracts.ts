@@ -127,6 +127,7 @@ export const quizFeedbackSchema = z.strictObject({
 
 export const providerErrorCodeSchema = z.enum([
     'invalid-config',
+    'invalid-request',
     'invalid-response',
     'authentication',
     'rate-limited',
@@ -236,6 +237,11 @@ export const translationIpcChannels = {
     selectionShortcut: 'desktop-pet:selection-shortcut'
 } as const;
 
+export const screenshotIpcChannels = {
+    translate: 'desktop-pet:screenshot-translate',
+    shortcut: 'desktop-pet:screenshot-shortcut'
+} as const;
+
 export const selectionCaptureSchema = z.strictObject({
     sourceText: nonEmptyString,
     method: z.enum(['accessibility', 'clipboard']),
@@ -247,6 +253,10 @@ export const screenBoundsSchema = z.strictObject({
     y: z.number(),
     width: positiveInteger,
     height: positiveInteger
+});
+
+export const screenshotTranslationStartSchema = z.strictObject({
+    bounds: screenBoundsSchema
 });
 
 const capturedImageBaseSchema = z.strictObject({
