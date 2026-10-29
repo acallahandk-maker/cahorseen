@@ -6,7 +6,13 @@ import {
     type ConnectionTestResult,
     type ProviderErrorCode,
     type ProviderConfig,
-    type ProviderSummary
+    type ProviderDetails,
+    type ProviderSaveConfig,
+    type ProviderSummary,
+    providerDetailsSchema,
+    settingsPreferencesSchema,
+    type SettingsPreferences,
+    type SettingsState
 } from '../../shared/contracts';
 import {
     OpenAiClient,
@@ -73,6 +79,20 @@ export interface ProviderPreset {
     requiresUserBaseUrl: boolean;
 }
 
+export const DEFAULT_SETTINGS_PREFERENCES: SettingsPreferences = {
+    hotkey: 'Ctrl+Shift+T',
+    privacy: {
+        localOnly: true,
+        saveTranslationHistory: false,
+        restoreClipboard: true
+    },
+    performance: {
+        reduceMotion: false,
+        pauseWhenFullscreen: true,
+        limitFrameRate: true
+    }
+};
+
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     {
         id: 'mimo',
@@ -117,7 +137,8 @@ type StoredProvider = z.infer<typeof storedProviderSchema>;
 const storedStateSchema = z.strictObject({
     version: z.literal(1),
     activeProviderId: z.string().min(1).optional(),
-    providers: z.array(storedProviderSchema)
+    providers: z.array(storedProviderSchema),
+    preferences: settingsPreferencesSchema.optional()
 });
 const persistedStateSchema = z.union([
     storedStateSchema,
@@ -138,10 +159,32 @@ export class SecureConfigService {
         });
     }
 
-    async saveProvider(config: ProviderConfig): Promise<ProviderSummary> {
+    async saveProvider(config: ProviderSaveConfig): Promise<ProviderSummary> {
+        const state = await this.readState();
+        const existing = config.id === undefined
+            ? undefined
+            : state.providers.find((provider) => provider.id === config.id);
+        let apiKey: string | undefined;
+        if (config.apiKey !== undefined) {
+            apiKey = config.apiKey;
+        } else if (existing !== undefined) {
+            try {
+                apiKey = this.safeStorage.decryptString(
+                    Buffer.from(existing.encryptedApiKey, 'base64')
+                );
+            } catch {
+                throw new SecureConfigError('storage-error');
+            }
+        }
+        if (apiKey === undefined || apiKey.length === 0)
+            throw new SecureConfigError('invalid-config');
+
         let validated: ProviderConfig;
         try {
-            validated = validateProviderConfig(config);
+            validated = validateProviderConfig({
+                ...config,
+                apiKey
+            });
         } catch {
             throw new SecureConfigError('invalid-config');
         }
@@ -172,7 +215,6 @@ export class SecureConfigService {
             timeoutMs: validated.timeoutMs,
             streaming: validated.streaming
         };
-        const state = await this.readState();
         const existingIndex = state.providers.findIndex((provider) => provider.id === id);
         if (existingIndex >= 0)
             state.providers[existingIndex] = storedProvider;
@@ -184,8 +226,40 @@ export class SecureConfigService {
         return toProviderSummary(storedProvider);
     }
 
+    async deleteProvider(providerId: string): Promise<void> {
+        const state = await this.readState();
+        const providerIndex = state.providers.findIndex(
+            (provider) => provider.id === providerId
+        );
+        if (providerIndex < 0)
+            throw new SecureConfigError('provider-not-found');
+
+        state.providers.splice(providerIndex, 1);
+        if (state.activeProviderId === providerId)
+            state.activeProviderId = state.providers[0]?.id;
+        await this.writeState(state);
+    }
+
     async getProviderSummaries(): Promise<ProviderSummary[]> {
         return (await this.readState()).providers.map(toProviderSummary);
+    }
+
+    async getProviderDetails(providerId: string): Promise<ProviderDetails> {
+        const state = await this.readState();
+        const provider = state.providers.find((item) => item.id === providerId);
+        if (provider === undefined)
+            throw new SecureConfigError('provider-not-found');
+        return providerDetailsSchema.parse({
+            id: provider.id,
+            name: provider.name,
+            baseUrl: provider.baseUrl,
+            textModel: provider.textModel,
+            visionModel: provider.visionModel,
+            systemPrompt: provider.systemPrompt,
+            targetLanguage: provider.targetLanguage,
+            timeoutMs: provider.timeoutMs,
+            streaming: provider.streaming
+        });
     }
 
     async getActiveProviderConfig(): Promise<ProviderConfig> {
@@ -201,6 +275,27 @@ export class SecureConfigService {
             throw new SecureConfigError('provider-not-found');
         state.activeProviderId = providerId;
         await this.writeState(state);
+    }
+
+    async getSettings(): Promise<SettingsState> {
+        const state = await this.readState();
+        return {
+            activeProviderId: state.activeProviderId,
+            preferences: state.preferences ?? DEFAULT_SETTINGS_PREFERENCES
+        };
+    }
+
+    async saveSettings(preferences: SettingsPreferences): Promise<SettingsState> {
+        const parsed = settingsPreferencesSchema.safeParse(preferences);
+        if (!parsed.success)
+            throw new SecureConfigError('invalid-config');
+        const state = await this.readState();
+        state.preferences = parsed.data;
+        await this.writeState(state);
+        return {
+            activeProviderId: state.activeProviderId,
+            preferences: parsed.data
+        };
     }
 
     async testProvider(
@@ -366,16 +461,34 @@ export function createSecureConfigService(
     return new SecureConfigService(options);
 }
 
-export async function saveProvider(config: ProviderConfig): Promise<ProviderSummary> {
+export async function saveProvider(config: ProviderSaveConfig): Promise<ProviderSummary> {
     return (await getDefaultService()).saveProvider(config);
+}
+
+export async function deleteProvider(providerId: string): Promise<void> {
+    await (await getDefaultService()).deleteProvider(providerId);
 }
 
 export async function setActiveProvider(providerId: string): Promise<void> {
     await (await getDefaultService()).setActiveProvider(providerId);
 }
 
+export async function getSettings(): Promise<SettingsState> {
+    return (await getDefaultService()).getSettings();
+}
+
+export async function saveSettings(
+    preferences: SettingsPreferences
+): Promise<SettingsState> {
+    return (await getDefaultService()).saveSettings(preferences);
+}
+
 export async function getProviderSummaries(): Promise<ProviderSummary[]> {
     return (await getDefaultService()).getProviderSummaries();
+}
+
+export async function getProviderDetails(providerId: string): Promise<ProviderDetails> {
+    return (await getDefaultService()).getProviderDetails(providerId);
 }
 
 export async function getActiveProviderConfig(): Promise<ProviderConfig> {

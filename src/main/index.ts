@@ -22,7 +22,11 @@ import {
 import { runSmokeModeIfEnabled } from './smokeMode';
 import {
     getProviderSummaries,
+    getProviderDetails,
+    deleteProvider,
+    getSettings,
     saveProvider,
+    saveSettings,
     setActiveProvider,
     testProvider
 } from './services/secureConfig';
@@ -40,6 +44,12 @@ function getRendererUrl(): string {
     );
     if (process.env.DESKTOP_PET_SMOKE_SCENARIO === 'live2d-real')
         url.searchParams.set('live2d-smoke', '1');
+    return url.href;
+}
+
+function getSettingsRendererUrl(): string {
+    const url = new URL(getRendererUrl());
+    url.searchParams.set('settings', '1');
     return url.href;
 }
 
@@ -78,10 +88,44 @@ function getScreenshotOverlayUrl(): string {
 
 app.whenReady().then(() => {
     ipcMain.handle(pingChannel, () => ({ version: app.getVersion() }));
+    let petWindow = createWindow();
+    let settingsWindow: BrowserWindow | undefined;
+    const openSettingsWindow = (): void => {
+        if (settingsWindow !== undefined && !settingsWindow.isDestroyed()) {
+            settingsWindow.show();
+            settingsWindow.focus();
+            return;
+        }
+        settingsWindow = new BrowserWindow({
+            parent: petWindow,
+            modal: false,
+            width: 680,
+            height: 760,
+            minWidth: 560,
+            minHeight: 520,
+            title: 'Desktop Pet Translator Settings',
+            show: false,
+            webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                preload: join(__dirname, '../preload/index.js'),
+                sandbox: true
+            }
+        });
+        settingsWindow.once('ready-to-show', () => settingsWindow?.show());
+        settingsWindow.on('closed', () => {
+            settingsWindow = undefined;
+        });
+        void settingsWindow.loadURL(getSettingsRendererUrl());
+    };
     registerIpcRouter({
         ipcMain,
         secureConfig: {
+            deleteProvider,
+            getSettings,
+            getProviderDetails,
             saveProvider,
+            saveSettings,
             setActiveProvider,
             getProviderSummaries,
             testProvider
@@ -92,9 +136,18 @@ app.whenReady().then(() => {
         },
         screenshot: {
             translateScreenshot
+        },
+        isSenderAuthorized: (event) => {
+            const senderFrame = (
+                event as { senderFrame?: { url?: unknown } }
+            ).senderFrame;
+            return senderFrame?.url === getRendererUrl()
+                || senderFrame?.url === getSettingsRendererUrl();
+        },
+        openSettings: () => {
+            openSettingsWindow();
         }
     });
-    let petWindow = createWindow();
     if (runSmokeModeIfEnabled(petWindow))
         return;
     const screenshotOverlay = new ScreenshotOverlayController({

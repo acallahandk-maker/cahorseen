@@ -251,10 +251,14 @@ describe('secure provider configuration', () => {
         });
 
         expect([...handlers.keys()].sort()).toEqual([
+            'desktop-pet:provider-delete',
             providerIpcChannels.save,
             providerIpcChannels.setActive,
             providerIpcChannels.summaries,
-            providerIpcChannels.test
+            'desktop-pet:provider-details',
+            providerIpcChannels.test,
+            'desktop-pet:settings-get',
+            'desktop-pet:settings-save'
         ].sort());
 
         const invalidResult = await handlers.get(providerIpcChannels.save)?.({}, {

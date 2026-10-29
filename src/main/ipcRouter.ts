@@ -4,21 +4,29 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import {
     connectionTestResultSchema,
+    providerDetailsSchema,
     providerErrorCodeSchema,
-    providerConfigSchema,
+    providerSaveConfigSchema,
+    providerDeleteSchema,
     providerSummarySchema,
     screenshotIpcChannels,
     screenshotTranslationStartSchema,
+    settingsIpcChannels,
+    settingsPreferencesSchema,
+    settingsStateSchema,
     translationCancelSchema,
     translationEventSchema,
     translationIpcChannels,
     translationStartSchema,
     type ConnectionTestResult,
+    type ProviderDetails,
     type ProviderErrorCode,
-    type ProviderConfig,
+    type ProviderSaveConfig,
     type ProviderSummary,
     type ScreenBounds,
     type SelectionCapture,
+    type SettingsPreferences,
+    type SettingsState,
     type TranslationError,
     type TranslationTask
 } from '../shared/contracts';
@@ -32,19 +40,25 @@ import type { ScreenshotTranslationOptions } from './services/screenshotService'
 
 export const providerIpcChannels = {
     save: 'desktop-pet:provider-save',
+    delete: 'desktop-pet:provider-delete',
     setActive: 'desktop-pet:provider-set-active',
     summaries: 'desktop-pet:provider-summaries',
+    details: 'desktop-pet:provider-details',
     test: 'desktop-pet:provider-test'
 } as const;
 
 export interface ProviderIpcService {
-    saveProvider(config: ProviderConfig): Promise<ProviderSummary>;
+    saveProvider(config: ProviderSaveConfig): Promise<ProviderSummary>;
+    deleteProvider?(providerId: string): Promise<void>;
     setActiveProvider(providerId: string): Promise<void>;
     getProviderSummaries(): Promise<ProviderSummary[]>;
+    getProviderDetails?(providerId: string): Promise<ProviderDetails>;
     testProvider(
         providerId: string,
         capability: 'text' | 'vision'
     ): Promise<ConnectionTestResult>;
+    getSettings?(): Promise<SettingsState>;
+    saveSettings?(preferences: SettingsPreferences): Promise<SettingsState>;
 }
 
 export interface SelectionIpcService {
@@ -70,6 +84,7 @@ export interface RegisterIpcRouterOptions {
     selection?: SelectionIpcService;
     screenshot?: ScreenshotIpcService;
     isSenderAuthorized?: (event: unknown) => boolean;
+    openSettings?: () => void;
 }
 
 type IpcFailure = {
@@ -184,18 +199,38 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         if (!isSenderAuthorized(event))
             return failure('unauthorized', 'IPC sender is not authorized.');
 
-        const parsed = providerConfigSchema.safeParse(payload);
+        const parsed = providerSaveConfigSchema.safeParse(payload);
         if (!parsed.success)
             return failure('invalid-request', 'Provider configuration is invalid.');
 
         try {
-            const summary = await secureConfig.saveProvider(
-                validateProviderConfig(parsed.data)
-            );
+            validateProviderConfig({
+                ...parsed.data,
+                apiKey: parsed.data.apiKey ?? 'validation-placeholder'
+            });
+            const summary = await secureConfig.saveProvider(parsed.data);
             return {
                 ok: true,
                 value: providerSummarySchema.parse(summary)
             } satisfies IpcSuccess<ProviderSummary>;
+        } catch (error) {
+            return safeFailure(error);
+        }
+    });
+
+    ipcMain.handle(providerIpcChannels.delete, async (event, payload) => {
+        if (!isSenderAuthorized(event))
+            return failure('unauthorized', 'IPC sender is not authorized.');
+
+        const parsed = providerDeleteSchema.safeParse(payload);
+        if (!parsed.success)
+            return failure('invalid-request', 'Provider deletion request is invalid.');
+
+        try {
+            if (secureConfig.deleteProvider === undefined)
+                return failure('request-failed', 'Provider request failed.');
+            await secureConfig.deleteProvider(parsed.data.providerId);
+            return { ok: true } satisfies IpcSaveSuccess;
         } catch (error) {
             return safeFailure(error);
         }
@@ -217,9 +252,11 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         }
     });
 
-    ipcMain.handle(providerIpcChannels.summaries, async (event) => {
+    ipcMain.handle(providerIpcChannels.summaries, async (event, payload) => {
         if (!isSenderAuthorized(event))
             return failure('unauthorized', 'IPC sender is not authorized.');
+        if (payload !== undefined && !emptyPayloadSchema.safeParse(payload).success)
+            return failure('invalid-request', 'Provider summary request is invalid.');
 
         try {
             const summaries = await secureConfig.getProviderSummaries();
@@ -227,6 +264,26 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 ok: true,
                 value: summaries.map((summary) => providerSummarySchema.parse(summary))
             } satisfies IpcSuccess<ProviderSummary[]>;
+        } catch (error) {
+            return safeFailure(error);
+        }
+    });
+
+    ipcMain.handle(providerIpcChannels.details, async (event, payload) => {
+        if (!isSenderAuthorized(event))
+            return failure('unauthorized', 'IPC sender is not authorized.');
+        const parsed = providerDeleteSchema.safeParse(payload);
+        if (!parsed.success)
+            return failure('invalid-request', 'Provider details request is invalid.');
+        try {
+            if (secureConfig.getProviderDetails === undefined)
+                return failure('request-failed', 'Provider request failed.');
+            return {
+                ok: true,
+                value: providerDetailsSchema.parse(
+                    await secureConfig.getProviderDetails(parsed.data.providerId)
+                )
+            } satisfies IpcSuccess<ProviderDetails>;
         } catch (error) {
             return safeFailure(error);
         }
@@ -253,6 +310,57 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             return safeFailure(error);
         }
     });
+
+    ipcMain.handle(settingsIpcChannels.get, async (event, payload) => {
+        if (!isSenderAuthorized(event))
+            return failure('unauthorized', 'IPC sender is not authorized.');
+        if (payload !== undefined && !emptyPayloadSchema.safeParse(payload).success)
+            return failure('invalid-request', 'Settings request is invalid.');
+
+        try {
+            if (secureConfig.getSettings === undefined)
+                return failure('request-failed', 'Provider request failed.');
+            return {
+                ok: true,
+                value: settingsStateSchema.parse(await secureConfig.getSettings())
+            } satisfies IpcSuccess<SettingsState>;
+        } catch (error) {
+            return safeFailure(error);
+        }
+    });
+
+    ipcMain.handle(settingsIpcChannels.save, async (event, payload) => {
+        if (!isSenderAuthorized(event))
+            return failure('unauthorized', 'IPC sender is not authorized.');
+
+        const parsed = settingsPreferencesSchema.safeParse(payload);
+        if (!parsed.success)
+            return failure('invalid-request', 'Settings preferences are invalid.');
+
+        try {
+            if (secureConfig.saveSettings === undefined)
+                return failure('request-failed', 'Provider request failed.');
+            return {
+                ok: true,
+                value: settingsStateSchema.parse(
+                    await secureConfig.saveSettings(parsed.data)
+                )
+            } satisfies IpcSuccess<SettingsState>;
+        } catch (error) {
+            return safeFailure(error);
+        }
+    });
+
+    if (options.openSettings !== undefined) {
+        ipcMain.handle(settingsIpcChannels.open, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            if (payload !== undefined && !emptyPayloadSchema.safeParse(payload).success)
+                return failure('invalid-request', 'Settings open request is invalid.');
+            options.openSettings?.();
+            return { ok: true } satisfies IpcSaveSuccess;
+        });
+    }
 
     if (selection !== undefined) {
         ipcMain.handle(translationIpcChannels.captureSelection, async (event, payload) => {
@@ -400,9 +508,14 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
 
     return () => {
         ipcMain.removeHandler(providerIpcChannels.save);
+        ipcMain.removeHandler(providerIpcChannels.delete);
         ipcMain.removeHandler(providerIpcChannels.setActive);
         ipcMain.removeHandler(providerIpcChannels.summaries);
+        ipcMain.removeHandler(providerIpcChannels.details);
         ipcMain.removeHandler(providerIpcChannels.test);
+        ipcMain.removeHandler(settingsIpcChannels.get);
+        ipcMain.removeHandler(settingsIpcChannels.save);
+        ipcMain.removeHandler(settingsIpcChannels.open);
         ipcMain.removeHandler(translationIpcChannels.captureSelection);
         ipcMain.removeHandler(translationIpcChannels.translateSelection);
         ipcMain.removeHandler(screenshotIpcChannels.translate);

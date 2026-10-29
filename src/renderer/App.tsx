@@ -7,6 +7,7 @@ import type {
 } from '../shared/contracts';
 import PetWindow from './pet/PetWindow';
 import RegionSelector from './screenshot/RegionSelector';
+import SettingsWindow from './settings/SettingsWindow';
 import TranslationBubble from './translation/TranslationBubble';
 import {
     translationBubbleReducer,
@@ -18,6 +19,9 @@ interface DesktopPetApi {
     captureSelectionOnce: () => Promise<unknown>;
     translateSelection: () => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
+    openSettings: () => Promise<void>;
+    copyTranslation: (text: string) => Promise<void>;
+    speakTranslation: (text: string) => void;
     cancelTranslation: (taskId: string) => Promise<void>;
     openScreenshotSelection: () => Promise<void>;
     getScreenshotOverlayViewport: () => Promise<ScreenBounds>;
@@ -38,6 +42,10 @@ declare global {
 
 function isScreenshotOverlayMode(): boolean {
     return new URLSearchParams(window.location.search).get('screenshot-overlay') === '1';
+}
+
+function isSettingsMode(): boolean {
+    return new URLSearchParams(window.location.search).get('settings') === '1';
 }
 
 function ScreenshotOverlay(): React.JSX.Element | null {
@@ -84,6 +92,7 @@ function PetApp(): React.JSX.Element {
         streamDelta: ''
     });
     const [screenshotBounds, setScreenshotBounds] = useState<ScreenBounds>();
+    const [pinned, setPinned] = useState(false);
     const [mascotEvents, setMascotEvents] = useState<readonly MascotEvent[]>([]);
     const [mascotBatchId, setMascotBatchId] = useState(0);
     const emitMascotEvents = useCallback((events: readonly MascotEvent[]): void => {
@@ -166,6 +175,10 @@ function PetApp(): React.JSX.Element {
         void window.desktopPet.openScreenshotSelection().catch(() => undefined);
     }, []);
 
+    const openSettings = useCallback((): void => {
+        void window.desktopPet.openSettings().catch(() => undefined);
+    }, []);
+
     useEffect(() => {
         const removeEvents = window.desktopPet.onTranslationEvent((event) => {
             setTranslation((current) => translationBubbleReducer(current, event));
@@ -199,12 +212,18 @@ function PetApp(): React.JSX.Element {
                 <button type="button" onClick={openScreenshotSelection}>
                     Translate screenshot
                 </button>
+                <button type="button" onClick={openSettings}>Settings</button>
                 <TranslationBubble
                     task={translation.task}
                     streamDelta={translation.streamDelta}
-                    onCopy={() => void navigator.clipboard?.writeText(
-                        translation.task.translatedText
+                    pinned={pinned}
+                    onCopy={() => void window.desktopPet.copyTranslation(
+                        translation.streamDelta || translation.task.translatedText
                     )}
+                    onSpeak={() => window.desktopPet.speakTranslation(
+                        translation.streamDelta || translation.task.translatedText
+                    )}
+                    onTogglePin={() => setPinned((current) => !current)}
                     onRetry={() => {
                         if (screenshotBounds !== undefined)
                             void startScreenshotTranslation(screenshotBounds);
@@ -219,7 +238,9 @@ function PetApp(): React.JSX.Element {
 }
 
 export default function App(): React.JSX.Element | null {
-    return isScreenshotOverlayMode()
-        ? <ScreenshotOverlay />
-        : <PetApp />;
+    if (isScreenshotOverlayMode())
+        return <ScreenshotOverlay />;
+    if (isSettingsMode())
+        return <SettingsWindow />;
+    return <PetApp />;
 }

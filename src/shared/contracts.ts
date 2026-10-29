@@ -21,6 +21,19 @@ function isHttpsUrl(value: string): boolean {
     }
 }
 
+export function isValidHotkey(value: string): boolean {
+    const parts = value.split('+').map((part) => part.trim()).filter(Boolean);
+    if (parts.length < 2)
+        return false;
+    const modifiers = parts.slice(0, -1);
+    const key = parts.at(-1);
+    const allowedModifiers = ['Alt', 'Ctrl', 'Meta', 'Shift'];
+    return key !== undefined
+        && !allowedModifiers.includes(key)
+        && modifiers.every((modifier) => allowedModifiers.includes(modifier))
+        && new Set(modifiers).size === modifiers.length;
+}
+
 const httpsUrl = z.string().url().refine(isHttpsUrl, {
     message: 'Base URL must use HTTPS'
 });
@@ -86,6 +99,20 @@ export const providerConfigSchema = z.strictObject({
     targetLanguage: nonEmptyString.max(MAX_TARGET_LANGUAGE_CHARS).optional(),
     timeoutMs: positiveInteger.optional(),
     streaming: z.boolean().optional()
+});
+
+export const providerSaveConfigSchema = providerConfigSchema
+    .omit({ apiKey: true })
+    .extend({
+        apiKey: z.string().min(1).optional()
+    });
+
+export const providerDetailsSchema = providerConfigSchema
+    .omit({ apiKey: true })
+    .extend({ id: nonEmptyString });
+
+export const providerDeleteSchema = z.strictObject({
+    providerId: nonEmptyString
 });
 
 export const translationStatusSchema = z.enum([
@@ -237,6 +264,33 @@ export const translationIpcChannels = {
     selectionShortcut: 'desktop-pet:selection-shortcut'
 } as const;
 
+export const settingsIpcChannels = {
+    get: 'desktop-pet:settings-get',
+    save: 'desktop-pet:settings-save',
+    open: 'desktop-pet:settings-open'
+} as const;
+
+export const settingsPreferencesSchema = z.strictObject({
+    hotkey: z.string().min(1).max(64).refine(isValidHotkey, {
+        message: 'Use one or more modifiers plus exactly one key.'
+    }),
+    privacy: z.strictObject({
+        localOnly: z.boolean(),
+        saveTranslationHistory: z.boolean(),
+        restoreClipboard: z.boolean()
+    }),
+    performance: z.strictObject({
+        reduceMotion: z.boolean(),
+        pauseWhenFullscreen: z.boolean(),
+        limitFrameRate: z.boolean()
+    })
+});
+
+export const settingsStateSchema = z.strictObject({
+    activeProviderId: nonEmptyString.optional(),
+    preferences: settingsPreferencesSchema
+});
+
 export const screenshotIpcChannels = {
     open: 'desktop-pet:screenshot-open',
     overlayViewport: 'desktop-pet:screenshot-overlay-viewport',
@@ -367,6 +421,8 @@ export const performanceModeSchema = z.strictObject({
 
 export type ProviderSummary = z.infer<typeof providerSummarySchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
+export type ProviderSaveConfig = z.infer<typeof providerSaveConfigSchema>;
+export type ProviderDetails = z.infer<typeof providerDetailsSchema>;
 export type TranslationStatus = z.infer<typeof translationStatusSchema>;
 export type TranslationTask = z.infer<typeof translationTaskSchema>;
 export type SelectionErrorCode = z.infer<typeof selectionErrorCodeSchema>;
@@ -386,3 +442,5 @@ export type HeatStatistic = z.infer<typeof heatStatisticSchema>;
 export type PerformanceReason = z.infer<typeof performanceReasonSchema>;
 export type PerformanceFrameRate = z.infer<typeof performanceFrameRateSchema>;
 export type PerformanceMode = z.infer<typeof performanceModeSchema>;
+export type SettingsPreferences = z.infer<typeof settingsPreferencesSchema>;
+export type SettingsState = z.infer<typeof settingsStateSchema>;
