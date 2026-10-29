@@ -5,6 +5,7 @@ import type {
     SelectionCapture,
     TranslationError,
     TranslationEvent,
+    TranslationRetryInput,
     TranslationTask
 } from '../shared/contracts';
 import { translationErrorCodeSchema } from '../shared/contracts';
@@ -16,8 +17,7 @@ import {
     createFailedTranslationTask,
     isSelectionCaptureRetry,
     translationBubbleReducer,
-    type TranslationBubbleState,
-    type TranslationRetryContext
+    type TranslationBubbleState
 } from './translation/translationState';
 
 interface DesktopPetApi {
@@ -32,9 +32,7 @@ interface DesktopPetApi {
     copyTranslation: (text: string) => Promise<void>;
     speakTranslation: (text: string) => void;
     retryTranslation: (
-        request:
-            | { kind: 'selection'; sourceText: string }
-            | { kind: 'screenshot'; bounds: ScreenBounds }
+        request: TranslationRetryInput
     ) => Promise<TranslationTask>;
     cancelTranslation: (taskId: string) => Promise<void>;
     openScreenshotSelection: () => Promise<void>;
@@ -84,7 +82,7 @@ function applyTaskFailure(
     state: TranslationBubbleState,
     error: unknown,
     fallbackMessage: string,
-    retry: TranslationRetryContext
+    retry: TranslationRetryInput
 ): TranslationBubbleState {
     return {
         task: createFailedTranslationTask(
@@ -138,6 +136,7 @@ function PetApp(): React.JSX.Element {
             status: 'pending',
             kind: 'selection',
             sourceText: 'Selection translation',
+            retryInput: { kind: 'selection-capture', strategy: 'recapture' },
             translatedText: '',
             targetLanguage: 'und'
         },
@@ -171,9 +170,9 @@ function PetApp(): React.JSX.Element {
     const runSelectionTranslation = useCallback(async (): Promise<void> => {
         const taskId = globalThis.crypto?.randomUUID?.()
             ?? `selection-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        let retry: TranslationRetryContext = {
-            kind: 'selection',
-            sourceText: 'Capturing selected text'
+        let retry: TranslationRetryInput = {
+            kind: 'selection-capture',
+            strategy: 'recapture'
         };
         emitMascotEvents(['listening', 'thinking']);
         setTranslation({
@@ -182,6 +181,7 @@ function PetApp(): React.JSX.Element {
                 status: 'running',
                 kind: 'selection',
                 sourceText: 'Capturing selected text',
+                retryInput: retry,
                 translatedText: '',
                 targetLanguage: 'und'
             },
@@ -197,6 +197,7 @@ function PetApp(): React.JSX.Element {
                 return;
             retry = {
                 kind: 'selection',
+                strategy: 'reuse-source',
                 sourceText: capture.sourceText
             };
             const task = await window.desktopPet.translateSelection({
@@ -240,6 +241,11 @@ function PetApp(): React.JSX.Element {
                     status: 'running',
                     kind: 'screenshot',
                     sourceText: 'Screenshot region',
+                    retryInput: {
+                        kind: 'screenshot',
+                        strategy: 'recapture',
+                        bounds
+                    },
                     translatedText: '',
                     targetLanguage: 'und'
                 },
@@ -256,7 +262,11 @@ function PetApp(): React.JSX.Element {
                         current,
                         caught,
                         'Screenshot translation failed.',
-                        { kind: 'screenshot', bounds }
+                        {
+                            kind: 'screenshot',
+                            strategy: 'recapture',
+                            bounds
+                        }
                     )
                     : current);
             }
@@ -286,15 +296,7 @@ function PetApp(): React.JSX.Element {
             try {
                 if (task.kind === 'screenshot' && task.bounds === undefined)
                     throw new Error('Screenshot retry bounds are missing.');
-                const retried = task.kind === 'selection'
-                    ? await window.desktopPet.retryTranslation({
-                        kind: 'selection',
-                        sourceText: task.sourceText
-                    })
-                    : await window.desktopPet.retryTranslation({
-                        kind: 'screenshot',
-                        bounds: task.bounds!
-                    });
+                const retried = await window.desktopPet.retryTranslation(task.retryInput);
                 emitMascotEvents([retried.status === 'completed' ? 'success' : 'error']);
                 setTranslation((current) => applyTaskResult(current, retried));
             } catch (caught) {
@@ -304,15 +306,7 @@ function PetApp(): React.JSX.Element {
                         current,
                         caught,
                         'Translation retry failed.',
-                        task.kind === 'selection'
-                            ? {
-                                kind: 'selection',
-                                sourceText: task.sourceText
-                            }
-                            : {
-                                kind: 'screenshot',
-                                bounds: task.bounds!
-                            }
+                        task.retryInput
                     )
                     : current);
             }

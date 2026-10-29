@@ -145,6 +145,11 @@ describe('selection translation integration', () => {
                 status: 'completed',
                 kind: 'selection',
                 sourceText: 'selected text',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'selected text'
+                },
                 translatedText: 'selected text',
                 targetLanguage: 'zh-CN'
             }))
@@ -278,6 +283,11 @@ describe('selection translation integration', () => {
             status: 'failed',
             kind: 'selection',
             sourceText: 'exact failed selection input',
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'exact failed selection input'
+            },
             translatedText: '',
             sourceLanguage: 'en',
             targetLanguage: 'zh-CN',
@@ -356,6 +366,11 @@ describe('selection translation integration', () => {
                     status: 'completed',
                     kind: 'selection',
                     sourceText: 'selected text',
+                    retryInput: {
+                        kind: 'selection',
+                        strategy: 'reuse-source',
+                        sourceText: 'selected text'
+                    },
                     translatedText: 'ok',
                     targetLanguage: 'zh-CN'
                 };
@@ -424,6 +439,11 @@ describe('selection translation integration', () => {
                 status: 'pending',
                 kind: 'selection',
                 sourceText: 'Selection translation',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'Selection translation'
+                },
                 translatedText: '',
                 targetLanguage: 'und'
             },
@@ -445,6 +465,11 @@ describe('selection translation integration', () => {
                 status: 'completed',
                 kind: 'selection',
                 sourceText: 'older selection',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'older selection'
+                },
                 translatedText: 'older translation',
                 targetLanguage: 'zh-CN'
             }
@@ -461,6 +486,11 @@ describe('selection translation integration', () => {
                 status: 'failed',
                 kind: 'selection',
                 sourceText: 'older selection',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'older selection'
+                },
                 translatedText: '',
                 targetLanguage: 'zh-CN',
                 error: 'Provider rate limit exceeded.',
@@ -480,6 +510,11 @@ describe('selection translation integration', () => {
                 status: 'completed',
                 kind: 'selection',
                 sourceText: 'newer selection',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'newer selection'
+                },
                 translatedText: 'newer translation',
                 targetLanguage: 'zh-CN'
             }
@@ -519,6 +554,11 @@ describe('selection translation integration', () => {
                     status: 'completed',
                     kind: 'selection',
                     sourceText: 'repeat repeat repeat',
+                    retryInput: {
+                        kind: 'selection',
+                        strategy: 'reuse-source',
+                        sourceText: 'repeat repeat repeat'
+                    },
                     translatedText: '重复',
                     targetLanguage: 'zh-CN'
                 };
@@ -560,6 +600,11 @@ describe('selection translation integration', () => {
                 status: 'completed',
                 kind: 'selection',
                 sourceText: 'repeat repeat repeat',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'repeat repeat repeat'
+                },
                 translatedText: '重复',
                 targetLanguage: 'zh-CN'
             }
@@ -574,6 +619,11 @@ describe('selection translation integration', () => {
                     status: 'completed',
                     kind: 'selection',
                     sourceText: 'repeat repeat repeat',
+                    retryInput: {
+                        kind: 'selection',
+                        strategy: 'reuse-source',
+                        sourceText: 'repeat repeat repeat'
+                    },
                     translatedText: '重复',
                     targetLanguage: 'zh-CN'
                 }
@@ -742,8 +792,13 @@ describe('selection translation integration', () => {
             status: 'failed',
             kind: 'selection',
             sourceText: 'Capturing selected text',
+            retryInput: {
+                kind: 'selection-capture',
+                strategy: 'recapture'
+            },
             errorCode: 'aborted'
         });
+        expect(failedEvent.task.retryInput).not.toHaveProperty('sourceText');
         expect(selection.translateSelection).not.toHaveBeenCalled();
     });
 
@@ -768,6 +823,11 @@ describe('selection translation integration', () => {
                 status: 'completed',
                 kind: 'selection',
                 sourceText: 'exact stale selected text',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'exact stale selected text'
+                },
                 translatedText: 'stale success',
                 targetLanguage: 'zh-CN'
             }))

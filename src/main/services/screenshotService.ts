@@ -494,6 +494,11 @@ export class ScreenshotService {
                 status: 'completed',
                 kind: 'screenshot',
                 sourceText,
+                retryInput: {
+                    kind: 'screenshot',
+                    strategy: 'recapture',
+                    bounds
+                },
                 translatedText: result.translatedText,
                 sourceLanguage: 'und',
                 targetLanguage,
@@ -510,6 +515,11 @@ export class ScreenshotService {
                 status: 'failed',
                 kind: 'screenshot',
                 sourceText,
+                retryInput: {
+                    kind: 'screenshot',
+                    strategy: 'recapture',
+                    bounds
+                },
                 translatedText: '',
                 sourceLanguage: 'und',
                 targetLanguage,

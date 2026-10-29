@@ -234,6 +234,11 @@ describe('selectionService', () => {
             status: 'failed',
             kind: 'selection',
             sourceText: 'selected text',
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'selected text'
+            },
             translatedText: '',
             sourceLanguage: 'en',
             targetLanguage: 'zh-CN',
@@ -268,6 +273,11 @@ describe('selectionService', () => {
             status: 'failed',
             kind: 'selection',
             sourceText: 'selected text',
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'selected text'
+            },
             translatedText: '',
             sourceLanguage: 'en',
             targetLanguage: 'und',
@@ -302,6 +312,10 @@ describe('selectionService', () => {
                 status: 'running',
                 kind: 'selection',
                 sourceText: 'Capturing selected text',
+                retryInput: {
+                    kind: 'selection-capture',
+                    strategy: 'recapture'
+                },
                 translatedText: '',
                 targetLanguage: 'und'
             },
@@ -320,6 +334,11 @@ describe('selectionService', () => {
                 status: 'completed',
                 kind: 'selection',
                 sourceText: 'hello',
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText: 'hello'
+                },
                 translatedText: '你好',
                 targetLanguage: 'zh-CN'
             }

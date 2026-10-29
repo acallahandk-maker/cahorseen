@@ -231,17 +231,21 @@ async function activeProviderTaskDetails(
 
 function failedSelectionTask(
     taskId: string,
-    sourceText: string,
+    sourceText: string | undefined,
     error: IpcFailure['error'],
     providerDetails: SafeProviderTaskDetails
 ): TranslationTask {
+    const displaySourceText = sourceText ?? 'Capturing selected text';
     return {
         id: taskId,
         status: 'failed',
         kind: 'selection',
-        sourceText,
+        sourceText: displaySourceText,
+        retryInput: sourceText === undefined
+            ? { kind: 'selection-capture', strategy: 'recapture' }
+            : { kind: 'selection', strategy: 'reuse-source', sourceText },
         translatedText: '',
-        sourceLanguage: detectSourceLanguage(sourceText),
+        sourceLanguage: detectSourceLanguage(displaySourceText),
         targetLanguage: 'und',
         ...providerDetails,
         error: error.message,
@@ -260,6 +264,11 @@ function failedScreenshotTask(
         status: 'failed',
         kind: 'screenshot',
         sourceText: 'Screenshot region',
+        retryInput: {
+            kind: 'screenshot',
+            strategy: 'recapture',
+            bounds
+        },
         translatedText: '',
         sourceLanguage: 'und',
         targetLanguage: 'und',
@@ -309,7 +318,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             record.cancelledTask = record.kind === 'selection'
                 ? failedSelectionTask(
                     record.taskId,
-                    record.sourceText ?? 'Capturing selected text',
+                    record.sourceText,
                     error,
                     providerDetails
                 )
@@ -545,7 +554,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 const result = failure('aborted', providerErrorMessage('aborted'));
                 const task = failedSelectionTask(
                     taskId,
-                    parsed.data.sourceText ?? 'Capturing selected text',
+                    parsed.data.sourceText,
                     result.error,
                     await activeProviderTaskDetails(secureConfig)
                 );
@@ -608,7 +617,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     : safeSelectionFailure(error);
                 const task = failedSelectionTask(
                     taskId,
-                    capturedSourceText ?? 'Capturing selected text',
+                    capturedSourceText,
                     result.error,
                     await activeProviderTaskDetails(secureConfig)
                 );

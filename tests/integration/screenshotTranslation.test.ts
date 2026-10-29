@@ -92,6 +92,11 @@ describe('screenshot translation', () => {
             status: 'completed',
             kind: 'screenshot',
             sourceText: 'Screenshot region',
+            retryInput: {
+                kind: 'screenshot',
+                strategy: 'recapture',
+                bounds
+            },
             translatedText: 'translated',
             sourceLanguage: 'und',
             targetLanguage: 'zh-CN',
@@ -472,6 +477,11 @@ describe('screenshot translation', () => {
                     status: 'completed',
                     kind: 'screenshot',
                     sourceText: 'Screenshot region',
+                    retryInput: {
+                        kind: 'screenshot',
+                        strategy: 'recapture',
+                        bounds
+                    },
                     translatedText: 'translated',
                     targetLanguage: 'zh-CN',
                     bounds
@@ -549,6 +559,11 @@ describe('screenshot translation', () => {
                         status: 'completed',
                         kind: 'screenshot',
                         sourceText: 'Screenshot region',
+                        retryInput: {
+                            kind: 'screenshot',
+                            strategy: 'recapture',
+                            bounds
+                        },
                         translatedText: 'translated',
                         targetLanguage: 'zh-CN',
                         bounds
@@ -718,6 +733,11 @@ describe('screenshot translation', () => {
                     status: 'completed',
                     kind: 'screenshot',
                     sourceText: 'Screenshot region',
+                    retryInput: {
+                        kind: 'screenshot',
+                        strategy: 'recapture',
+                        bounds
+                    },
                     translatedText: 'translated',
                     targetLanguage: 'zh-CN',
                     bounds

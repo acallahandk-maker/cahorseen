@@ -647,6 +647,11 @@ describe('SettingsWindow', () => {
             status: 'failed',
             kind: 'selection',
             sourceText: 'exact retry source',
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'exact retry source'
+            },
             translatedText: '',
             sourceLanguage: 'en',
             targetLanguage: 'zh-CN',

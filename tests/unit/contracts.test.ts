@@ -15,6 +15,7 @@ import {
     selectionCaptureSchema,
     screenshotTranslationStartSchema,
     translationStartSchema,
+    translationRetryInputSchema,
     translationTaskSchema
 } from '../../src/shared/contracts';
 
@@ -76,6 +77,11 @@ describe('shared contracts', () => {
             status: 'completed',
             kind: 'selection',
             sourceText: 'hello',
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'hello'
+            },
             translatedText: '你好',
             targetLanguage: 'zh-CN'
         };
@@ -122,6 +128,11 @@ describe('shared contracts', () => {
             status: 'failed',
             kind: 'selection',
             sourceText: 'exact source',
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'exact source'
+            },
             translatedText: '',
             sourceLanguage: 'en',
             targetLanguage: 'zh-CN',
@@ -139,6 +150,11 @@ describe('shared contracts', () => {
             id: 'fallback-screenshot',
             kind: 'screenshot',
             sourceText: 'Screenshot region',
+            retryInput: {
+                kind: 'screenshot',
+                strategy: 'recapture',
+                bounds: screenshotBounds
+            },
             sourceLanguage: 'und',
             bounds: screenshotBounds
         };
@@ -153,6 +169,62 @@ describe('shared contracts', () => {
             ...failedScreenshot,
             dataUrl: 'data:image/png;base64,synthetic-image'
         })).toThrow();
+    });
+
+    it('validates explicit retry input without inferring behavior from display text', () => {
+        const reuseSource = {
+            kind: 'selection',
+            strategy: 'reuse-source',
+            sourceText: 'Capturing selected text'
+        };
+        const recapture = {
+            kind: 'selection-capture',
+            strategy: 'recapture'
+        };
+
+        expect(translationRetryInputSchema.parse(reuseSource)).toEqual(reuseSource);
+        expect(translationRetryInputSchema.parse(recapture)).toEqual(recapture);
+        expect(translationRetryInputSchema.safeParse({
+            kind: 'selection-capture',
+            strategy: 'recapture',
+            sourceText: 'Capturing selected text'
+        }).success).toBe(false);
+    });
+
+    it('allows placeholder display text only when retry input explicitly reuses it', () => {
+        const base = {
+            id: 'placeholder-task',
+            status: 'failed',
+            kind: 'selection',
+            sourceText: 'Capturing selected text',
+            translatedText: '',
+            targetLanguage: 'und',
+            error: 'Provider request was cancelled.',
+            errorCode: 'aborted'
+        };
+
+        expect(translationTaskSchema.parse({
+            ...base,
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'Capturing selected text'
+            }
+        }).retryInput).toEqual({
+            kind: 'selection',
+            strategy: 'reuse-source',
+            sourceText: 'Capturing selected text'
+        });
+        expect(translationTaskSchema.parse({
+            ...base,
+            retryInput: {
+                kind: 'selection-capture',
+                strategy: 'recapture'
+            }
+        }).retryInput).toEqual({
+            kind: 'selection-capture',
+            strategy: 'recapture'
+        });
     });
 
     it('validates IPC result and capture contracts', () => {

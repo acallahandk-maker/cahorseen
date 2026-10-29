@@ -18,6 +18,7 @@ import {
     translationCancelSchema,
     translationEventSchema,
     translationIpcChannels,
+    translationRetryInputSchema,
     translationStartSchema,
     translationTaskSchema,
     type ConnectionTestResult,
@@ -29,6 +30,7 @@ import {
     type SettingsPreferences,
     type SettingsState,
     type TranslationEvent,
+    type TranslationRetryInput,
     type TranslationTask
 } from '../shared/contracts';
 import { parseIpcAck, parseIpcResult, parseIpcTaskResult } from './ipcResult';
@@ -79,9 +81,7 @@ export interface DesktopPetApi {
     copyTranslation: (text: string) => Promise<void>;
     speakTranslation: (text: string) => void;
     retryTranslation: (
-        request:
-            | { kind: 'selection'; sourceText: string }
-            | { kind: 'screenshot'; bounds: ScreenBounds }
+        request: TranslationRetryInput
     ) => Promise<TranslationTask>;
 }
 
@@ -219,19 +219,31 @@ const desktopPetApi: DesktopPetApi = {
         window.speechSynthesis.speak(utterance);
     },
     retryTranslation: async (request) => {
-        if (request.kind === 'selection') {
+        const parsedRequest = translationRetryInputSchema.parse(request);
+        if (parsedRequest.kind === 'selection') {
             return parseIpcTaskResult(
                 translationTaskSchema,
                 await ipcRenderer.invoke(
                     translationIpcChannels.translateSelection,
-                    translationStartSchema.parse({ sourceText: request.sourceText })
+                    translationStartSchema.parse({
+                        sourceText: parsedRequest.sourceText
+                    })
+                )
+            );
+        }
+        if (parsedRequest.kind === 'selection-capture') {
+            return parseIpcTaskResult(
+                translationTaskSchema,
+                await ipcRenderer.invoke(
+                    translationIpcChannels.translateSelection,
+                    translationStartSchema.parse({})
                 )
             );
         }
         return parseIpcTaskResult(
             translationTaskSchema,
             await ipcRenderer.invoke(screenshotIpcChannels.translate, {
-                bounds: screenBoundsSchema.parse(request.bounds)
+                bounds: screenBoundsSchema.parse(parsedRequest.bounds)
             })
         );
     }

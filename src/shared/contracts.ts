@@ -241,6 +241,23 @@ export const screenBoundsSchema = z.strictObject({
     height: positiveInteger
 });
 
+export const translationRetryInputSchema = z.discriminatedUnion('kind', [
+    z.strictObject({
+        kind: z.literal('selection'),
+        strategy: z.literal('reuse-source'),
+        sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS)
+    }),
+    z.strictObject({
+        kind: z.literal('selection-capture'),
+        strategy: z.literal('recapture')
+    }),
+    z.strictObject({
+        kind: z.literal('screenshot'),
+        strategy: z.literal('recapture'),
+        bounds: screenBoundsSchema
+    })
+]);
+
 export const translationTaskSchema = z.strictObject({
     id: nonEmptyString,
     status: translationStatusSchema,
@@ -256,7 +273,8 @@ export const translationTaskSchema = z.strictObject({
     visionModel: nonEmptyString.optional(),
     translationModel: nonEmptyString.optional(),
     error: z.string().optional(),
-    errorCode: translationErrorCodeSchema.optional()
+    errorCode: translationErrorCodeSchema.optional(),
+    retryInput: translationRetryInputSchema
 }).superRefine((task, context) => {
     if (task.kind === 'screenshot' && task.bounds === undefined) {
         context.addIssue({
@@ -270,6 +288,48 @@ export const translationTaskSchema = z.strictObject({
             code: 'custom',
             path: ['bounds'],
             message: 'Selection tasks must not retain capture bounds'
+        });
+    }
+    if (task.kind === 'selection' && task.retryInput.kind === 'screenshot') {
+        context.addIssue({
+            code: 'custom',
+            path: ['retryInput'],
+            message: 'Selection tasks must use selection retry input'
+        });
+    }
+    if (
+        task.kind === 'selection'
+        && task.retryInput.kind === 'selection'
+        && task.retryInput.sourceText !== task.sourceText
+    ) {
+        context.addIssue({
+            code: 'custom',
+            path: ['retryInput', 'sourceText'],
+            message: 'Selection retry source must match the task source'
+        });
+    }
+    if (task.kind === 'screenshot' && task.retryInput.kind !== 'screenshot') {
+        context.addIssue({
+            code: 'custom',
+            path: ['retryInput'],
+            message: 'Screenshot tasks must use screenshot retry input'
+        });
+    }
+    if (
+        task.kind === 'screenshot'
+        && task.retryInput.kind === 'screenshot'
+        && (
+            task.bounds === undefined
+            || task.retryInput.bounds.x !== task.bounds.x
+            || task.retryInput.bounds.y !== task.bounds.y
+            || task.retryInput.bounds.width !== task.bounds.width
+            || task.retryInput.bounds.height !== task.bounds.height
+        )
+    ) {
+        context.addIssue({
+            code: 'custom',
+            path: ['retryInput', 'bounds'],
+            message: 'Screenshot retry bounds must match the task bounds'
         });
     }
 });
@@ -481,6 +541,7 @@ export type ProviderSaveConfig = z.infer<typeof providerSaveConfigSchema>;
 export type ProviderDetails = z.infer<typeof providerDetailsSchema>;
 export type TranslationStatus = z.infer<typeof translationStatusSchema>;
 export type TranslationTask = z.infer<typeof translationTaskSchema>;
+export type TranslationRetryInput = z.infer<typeof translationRetryInputSchema>;
 export type SelectionErrorCode = z.infer<typeof selectionErrorCodeSchema>;
 export type TranslationErrorCode = z.infer<typeof translationErrorCodeSchema>;
 export type TranslationError = z.infer<typeof translationErrorSchema>;

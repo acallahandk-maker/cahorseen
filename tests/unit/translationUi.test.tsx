@@ -37,23 +37,67 @@ const completedTask: TranslationTask = {
 afterEach(cleanup);
 
 describe('TranslationBubble', () => {
-    it('uses recapture only for cancelled selection capture retry input', () => {
-        expect(isSelectionCaptureRetry({
+    it('reuses a known source exactly equal to the capture placeholder', () => {
+        const task = {
             ...completedTask,
             kind: 'selection',
             status: 'failed',
             sourceText: 'Capturing selected text',
+            retryInput: {
+                kind: 'selection',
+                strategy: 'reuse-source',
+                sourceText: 'Capturing selected text'
+            },
             error: 'Provider request was cancelled.',
             errorCode: 'aborted'
-        })).toBe(true);
-        expect(isSelectionCaptureRetry({
+        } as TranslationTask;
+
+        expect(isSelectionCaptureRetry(task)).toBe(false);
+        expect(task.retryInput).toEqual({
+            kind: 'selection',
+            strategy: 'reuse-source',
+            sourceText: 'Capturing selected text'
+        });
+    });
+
+    it('recaptures a cancelled pending selection without treating placeholder text as source', () => {
+        const task = {
             ...completedTask,
             kind: 'selection',
             status: 'failed',
-            sourceText: 'exact safe retry input',
+            sourceText: 'Capturing selected text',
+            retryInput: {
+                kind: 'selection-capture',
+                strategy: 'recapture'
+            },
             error: 'Provider request was cancelled.',
             errorCode: 'aborted'
-        })).toBe(false);
+        } as TranslationTask;
+
+        expect(isSelectionCaptureRetry(task)).toBe(true);
+        expect(task.retryInput).toEqual({
+            kind: 'selection-capture',
+            strategy: 'recapture'
+        });
+        expect(task.retryInput).not.toHaveProperty('sourceText');
+
+        const failure = createFailedTranslationTask(
+            {
+                ...completedTask,
+                id: 'cancelled-capture',
+                status: 'running',
+                sourceText: 'Capturing selected text',
+                translatedText: ''
+            },
+            task.retryInput,
+            { code: 'aborted', message: 'Provider request was cancelled.' }
+        );
+        expect(failure.retryInput).toEqual({
+            kind: 'selection-capture',
+            strategy: 'recapture'
+        });
+        expect(failure.retryInput).not.toHaveProperty('sourceText');
+        expect(failure.sourceText).toBe('Capturing selected text');
     });
 
     it('ignores stale capture completion after cancellation', () => {

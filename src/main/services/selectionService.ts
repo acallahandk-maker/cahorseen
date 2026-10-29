@@ -242,6 +242,11 @@ export class SelectionService {
                 status: 'completed',
                 kind: 'selection',
                 sourceText,
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText
+                },
                 translatedText: result.translatedText,
                 sourceLanguage: detectSourceLanguage(sourceText),
                 targetLanguage,
@@ -257,6 +262,11 @@ export class SelectionService {
                 status: 'failed',
                 kind: 'selection',
                 sourceText,
+                retryInput: {
+                    kind: 'selection',
+                    strategy: 'reuse-source',
+                    sourceText
+                },
                 translatedText: '',
                 sourceLanguage: detectSourceLanguage(sourceText),
                 targetLanguage,

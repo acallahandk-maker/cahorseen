@@ -1,7 +1,7 @@
 import type {
-    ScreenBounds,
     TranslationError,
     TranslationEvent,
+    TranslationRetryInput,
     TranslationTask
 } from '../../shared/contracts';
 
@@ -10,15 +10,11 @@ export interface TranslationBubbleState {
     streamDelta: string;
 }
 
-export type TranslationRetryContext =
-    | { kind: 'selection'; sourceText: string }
-    | { kind: 'screenshot'; bounds: ScreenBounds };
+export type TranslationRetryContext = TranslationRetryInput;
 
 export function isSelectionCaptureRetry(task: TranslationTask): boolean {
-    return task.kind === 'selection'
-        && task.status === 'failed'
-        && task.errorCode === 'aborted'
-        && task.sourceText === 'Capturing selected text';
+    return task.status === 'failed'
+        && task.retryInput.kind === 'selection-capture';
 }
 
 export function createFailedTranslationTask(
@@ -30,7 +26,8 @@ export function createFailedTranslationTask(
     delete taskWithoutBounds.bounds;
     return {
         ...(retry.kind === 'selection' ? taskWithoutBounds : current),
-        ...retry,
+        sourceText: retry.kind === 'selection' ? retry.sourceText : current.sourceText,
+        retryInput: retry,
         status: 'failed',
         error: error.message,
         errorCode: error.code
