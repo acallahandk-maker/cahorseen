@@ -104,16 +104,16 @@ export function getProductionRendererFileUrl(): string {
     return pathToFileURL(join(__dirname, '../renderer/index.html')).href;
 }
 
+export function isProductionRendererUrl(value: unknown): boolean {
+    if (typeof value !== 'string')
+        return false;
+    return value === getProductionRendererFileUrl()
+        || value === process.env.ELECTRON_RENDERER_URL;
+}
+
 function defaultIsSenderAuthorized(event: unknown): boolean {
     const senderFrame = (event as { senderFrame?: { url?: unknown } }).senderFrame;
-    if (typeof senderFrame?.url !== 'string')
-        return false;
-
-    return senderFrame.url === getProductionRendererFileUrl()
-        || (
-            process.env.ELECTRON_RENDERER_URL !== undefined
-            && senderFrame.url === process.env.ELECTRON_RENDERER_URL
-        );
+    return isProductionRendererUrl(senderFrame?.url);
 }
 
 function failure(

@@ -2,7 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
     selectionCaptureSchema,
+    screenBoundsSchema,
     screenshotIpcChannels,
+    screenshotSelectionSchema,
     screenshotTranslationStartSchema,
     translationAckSchema,
     translationCancelSchema,
@@ -40,9 +42,15 @@ export interface DesktopPetApi {
     translateSelection: () => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     cancelTranslation: (taskId: string) => Promise<void>;
+    openScreenshotSelection: () => Promise<void>;
+    getScreenshotOverlayViewport: () => Promise<ScreenBounds>;
+    submitScreenshotSelection: (bounds: ScreenBounds) => Promise<void>;
+    cancelScreenshotSelection: () => Promise<void>;
     onTranslationEvent: (listener: (event: TranslationEvent) => void) => () => void;
     onSelectionShortcut: (listener: () => void) => () => void;
-    onScreenshotShortcut: (listener: () => void) => () => void;
+    onScreenshotSelection: (
+        listener: (selection: { bounds: ScreenBounds }) => void
+    ) => () => void;
 }
 
 function parseResult<T>(
@@ -86,6 +94,20 @@ const desktopPetApi: DesktopPetApi = {
         const request = translationCancelSchema.parse({ taskId });
         parseAck(await ipcRenderer.invoke(translationIpcChannels.cancel, request));
     },
+    openScreenshotSelection: async () => {
+        parseAck(await ipcRenderer.invoke(screenshotIpcChannels.open, {}));
+    },
+    getScreenshotOverlayViewport: async () => parseResult(
+        screenBoundsSchema,
+        await ipcRenderer.invoke(screenshotIpcChannels.overlayViewport, {})
+    ),
+    submitScreenshotSelection: async (bounds) => {
+        const request = screenshotSelectionSchema.parse({ bounds });
+        parseAck(await ipcRenderer.invoke(screenshotIpcChannels.select, request));
+    },
+    cancelScreenshotSelection: async () => {
+        parseAck(await ipcRenderer.invoke(screenshotIpcChannels.cancelSelection, {}));
+    },
     onTranslationEvent: (listener) => {
         const channelListener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
             listener(translationEventSchema.parse(payload));
@@ -107,14 +129,17 @@ const desktopPetApi: DesktopPetApi = {
             );
         };
     },
-    onScreenshotShortcut: (listener) => {
-        const channelListener = (): void => {
-            listener();
+    onScreenshotSelection: (listener) => {
+        const channelListener = (
+            _event: Electron.IpcRendererEvent,
+            payload: unknown
+        ): void => {
+            listener(screenshotSelectionSchema.parse(payload));
         };
-        ipcRenderer.on(screenshotIpcChannels.shortcut, channelListener);
+        ipcRenderer.on(screenshotIpcChannels.selected, channelListener);
         return () => {
             ipcRenderer.removeListener(
-                screenshotIpcChannels.shortcut,
+                screenshotIpcChannels.selected,
                 channelListener
             );
         };

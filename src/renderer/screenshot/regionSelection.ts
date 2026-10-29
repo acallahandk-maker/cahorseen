@@ -10,6 +10,16 @@ export interface RegionKeyEvent {
     preventDefault(): void;
 }
 
+export function overlayPointToScreenPoint(
+    point: RegionPoint,
+    viewport: ScreenBounds
+): RegionPoint {
+    return {
+        x: viewport.x + point.x,
+        y: viewport.y + point.y
+    };
+}
+
 export function clipRegionSelection(
     start: RegionPoint,
     end: RegionPoint,

@@ -9,12 +9,14 @@ import type { ScreenBounds } from '../../shared/contracts';
 import {
     clipRegionSelection,
     handleRegionKeyDown,
+    overlayPointToScreenPoint,
     type RegionPoint
 } from './regionSelection';
 
 export {
     clipRegionSelection,
     handleRegionKeyDown,
+    overlayPointToScreenPoint,
     type RegionKeyEvent,
     type RegionPoint
 } from './regionSelection';
@@ -40,10 +42,10 @@ function pointFromPointer(
     event: ReactPointerEvent<HTMLDivElement>,
     viewport: ScreenBounds
 ): RegionPoint {
-    return {
-        x: viewport.x + event.clientX,
-        y: viewport.y + event.clientY
-    };
+    return overlayPointToScreenPoint({
+        x: event.clientX,
+        y: event.clientY
+    }, viewport);
 }
 
 function selectionStyle(

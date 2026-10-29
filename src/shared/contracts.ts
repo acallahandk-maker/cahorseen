@@ -238,6 +238,11 @@ export const translationIpcChannels = {
 } as const;
 
 export const screenshotIpcChannels = {
+    open: 'desktop-pet:screenshot-open',
+    overlayViewport: 'desktop-pet:screenshot-overlay-viewport',
+    select: 'desktop-pet:screenshot-select',
+    cancelSelection: 'desktop-pet:screenshot-cancel-selection',
+    selected: 'desktop-pet:screenshot-selected',
     translate: 'desktop-pet:screenshot-translate',
     shortcut: 'desktop-pet:screenshot-shortcut'
 } as const;
@@ -249,10 +254,14 @@ export const selectionCaptureSchema = z.strictObject({
 });
 
 export const screenBoundsSchema = z.strictObject({
-    x: z.number(),
-    y: z.number(),
+    x: z.number().int(),
+    y: z.number().int(),
     width: positiveInteger,
     height: positiveInteger
+});
+
+export const screenshotSelectionSchema = z.strictObject({
+    bounds: screenBoundsSchema
 });
 
 export const screenshotTranslationStartSchema = z.strictObject({

@@ -17,9 +17,15 @@ interface DesktopPetApi {
     translateSelection: () => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     cancelTranslation: (taskId: string) => Promise<void>;
+    openScreenshotSelection: () => Promise<void>;
+    getScreenshotOverlayViewport: () => Promise<ScreenBounds>;
+    submitScreenshotSelection: (bounds: ScreenBounds) => Promise<void>;
+    cancelScreenshotSelection: () => Promise<void>;
     onTranslationEvent: (listener: (event: TranslationEvent) => void) => () => void;
     onSelectionShortcut: (listener: () => void) => () => void;
-    onScreenshotShortcut: (listener: () => void) => () => void;
+    onScreenshotSelection: (
+        listener: (selection: { bounds: ScreenBounds }) => void
+    ) => () => void;
 }
 
 declare global {
@@ -28,7 +34,43 @@ declare global {
     }
 }
 
-export default function App(): React.JSX.Element {
+function isScreenshotOverlayMode(): boolean {
+    return new URLSearchParams(window.location.search).get('screenshot-overlay') === '1';
+}
+
+function ScreenshotOverlay(): React.JSX.Element | null {
+    const [viewport, setViewport] = useState<ScreenBounds>();
+
+    useEffect(() => {
+        let disposed = false;
+        void window.desktopPet.getScreenshotOverlayViewport()
+            .then((bounds) => {
+                if (!disposed)
+                    setViewport(bounds);
+            })
+            .catch(() => undefined);
+        return () => {
+            disposed = true;
+        };
+    }, []);
+
+    if (viewport === undefined)
+        return null;
+    return (
+        <RegionSelector
+            active
+            viewport={viewport}
+            onSelect={(bounds) => {
+                void window.desktopPet.submitScreenshotSelection(bounds);
+            }}
+            onCancel={() => {
+                void window.desktopPet.cancelScreenshotSelection();
+            }}
+        />
+    );
+}
+
+function PetApp(): React.JSX.Element {
     const [translation, setTranslation] = useState<TranslationBubbleState>({
         task: {
             id: 'starting',
@@ -38,13 +80,6 @@ export default function App(): React.JSX.Element {
             targetLanguage: 'und'
         },
         streamDelta: ''
-    });
-    const [screenshotSelection, setScreenshotSelection] = useState(false);
-    const [screenshotViewport, setScreenshotViewport] = useState<ScreenBounds>({
-        x: 0,
-        y: 0,
-        width: 1,
-        height: 1
     });
     const [screenshotBounds, setScreenshotBounds] = useState<ScreenBounds>();
     const startTranslation = useCallback(async (): Promise<void> => {
@@ -83,7 +118,6 @@ export default function App(): React.JSX.Element {
         bounds: ScreenBounds
     ): Promise<void> => {
         setScreenshotBounds(bounds);
-        setScreenshotSelection(false);
         setTranslation({
             task: {
                 id: 'screenshot-starting',
@@ -115,13 +149,7 @@ export default function App(): React.JSX.Element {
     }, []);
 
     const openScreenshotSelection = useCallback((): void => {
-        setScreenshotViewport({
-            x: 0,
-            y: 0,
-            width: window.innerWidth,
-            height: window.innerHeight
-        });
-        setScreenshotSelection(true);
+        void window.desktopPet.openScreenshotSelection().catch(() => undefined);
     }, []);
 
     useEffect(() => {
@@ -131,15 +159,17 @@ export default function App(): React.JSX.Element {
         const removeShortcut = window.desktopPet.onSelectionShortcut(() => {
             void startTranslation();
         });
-        const removeScreenshotShortcut = window.desktopPet.onScreenshotShortcut(
-            openScreenshotSelection
+        const removeScreenshotSelection = window.desktopPet.onScreenshotSelection(
+            ({ bounds }) => {
+                void startScreenshotTranslation(bounds);
+            }
         );
         return () => {
             removeEvents();
             removeShortcut();
-            removeScreenshotShortcut();
+            removeScreenshotSelection();
         };
-    }, [openScreenshotSelection, startTranslation]);
+    }, [startScreenshotTranslation, startTranslation]);
 
     return (
         <main>
@@ -150,14 +180,6 @@ export default function App(): React.JSX.Element {
             <button type="button" onClick={openScreenshotSelection}>
                 Translate screenshot
             </button>
-            {screenshotSelection ? (
-                <RegionSelector
-                    active
-                    viewport={screenshotViewport}
-                    onSelect={(bounds) => void startScreenshotTranslation(bounds)}
-                    onCancel={() => setScreenshotSelection(false)}
-                />
-            ) : null}
             <TranslationBubble
                 task={translation.task}
                 streamDelta={translation.streamDelta}
@@ -174,4 +196,10 @@ export default function App(): React.JSX.Element {
             />
         </main>
     );
+}
+
+export default function App(): React.JSX.Element | null {
+    return isScreenshotOverlayMode()
+        ? <ScreenshotOverlay />
+        : <PetApp />;
 }

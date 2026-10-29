@@ -164,6 +164,45 @@ describe('ScreenshotService', () => {
         ]);
     });
 
+    it('maps negative-origin display regions into physical capture coordinates', async () => {
+        const captureClippedRegion = vi.fn(async (
+            request: ScreenshotCaptureRequest
+        ) => imageResult(request.width, request.height));
+        const testService = new ScreenshotService({
+            captureAdapter: { captureClippedRegion },
+            translationRunner: runner(),
+            getProvider: async () => provider,
+            getDisplays: () => [{
+                x: -1_920,
+                y: -1_080,
+                width: 1_920,
+                height: 1_080
+            }],
+            mapBoundsToCapturePixels: (_displayIndex, value) => ({
+                x: Math.round(value.x * 1.25),
+                y: Math.round(value.y * 1.25),
+                width: Math.round(value.width * 1.25),
+                height: Math.round(value.height * 1.25)
+            }),
+            maxDimension: 1_000,
+            createId: () => 'screenshot-task'
+        });
+
+        await testService.captureRegion({
+            x: -1_800,
+            y: -900,
+            width: 200,
+            height: 100
+        });
+
+        expect(captureClippedRegion.mock.calls[0][0].segments[0].source).toEqual({
+            x: -2_250,
+            y: -1_125,
+            width: 250,
+            height: 125
+        });
+    });
+
     it('tiles oversized source regions to enforce the raw-pixel budget', async () => {
         const captureClippedRegion = vi.fn(async (
             request: ScreenshotCaptureRequest

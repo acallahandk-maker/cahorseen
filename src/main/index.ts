@@ -1,6 +1,15 @@
-import { app, BrowserWindow, globalShortcut, ipcMain } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
 import { join } from 'node:path';
-import { registerIpcRouter } from './ipcRouter';
+import {
+    getProductionRendererFileUrl,
+    isProductionRendererUrl,
+    registerIpcRouter
+} from './ipcRouter';
+import {
+    ScreenshotOverlayController,
+    type ScreenshotOverlayWindowLike,
+    type ScreenshotOverlayWindowOptions
+} from './screenshotOverlay';
 import {
     captureSelectionOnce,
     translateSelection
@@ -18,6 +27,7 @@ import {
     testProvider
 } from './services/secureConfig';
 import {
+    screenshotSelectionSchema,
     screenshotIpcChannels,
     translationIpcChannels
 } from '../shared/contracts';
@@ -45,6 +55,14 @@ function createWindow(): BrowserWindow {
     return window;
 }
 
+function getScreenshotOverlayUrl(): string {
+    const url = new URL(
+        process.env.ELECTRON_RENDERER_URL ?? getProductionRendererFileUrl()
+    );
+    url.searchParams.set('screenshot-overlay', '1');
+    return url.href;
+}
+
 app.whenReady().then(() => {
     ipcMain.handle(pingChannel, () => ({ version: app.getVersion() }));
     registerIpcRouter({
@@ -63,29 +81,66 @@ app.whenReady().then(() => {
             translateScreenshot
         }
     });
+    let petWindow = createWindow();
+    if (runSmokeModeIfEnabled(petWindow))
+        return;
+    const screenshotOverlay = new ScreenshotOverlayController({
+        ipcMain,
+        overlayUrl: getScreenshotOverlayUrl(),
+        getDisplays: () => screen.getAllDisplays().map((display) => display.bounds),
+        createWindow: (
+            options: ScreenshotOverlayWindowOptions
+        ): ScreenshotOverlayWindowLike => new BrowserWindow({
+            ...options,
+            webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                preload: join(__dirname, '../preload/index.js'),
+                sandbox: true
+            }
+        }),
+        onSelected: (bounds, owner) => {
+            owner.send(
+                screenshotIpcChannels.selected,
+                screenshotSelectionSchema.parse({ bounds })
+            );
+        },
+        isSenderAuthorized: (event, channel) => {
+            const senderFrame = (
+                event as { senderFrame?: { url?: unknown } }
+            ).senderFrame;
+            return channel === screenshotIpcChannels.open
+                ? isProductionRendererUrl(senderFrame?.url)
+                : senderFrame?.url === getScreenshotOverlayUrl();
+        }
+    });
     const disposeSelectionShortcut = registerSelectionShortcut({
         shortcut: globalShortcut,
         onTrigger: () => {
-            for (const window of BrowserWindow.getAllWindows())
-                window.webContents.send(translationIpcChannels.selectionShortcut);
+            if (!petWindow.isDestroyed())
+                petWindow.webContents.send(translationIpcChannels.selectionShortcut);
         }
     });
-    app.on('will-quit', disposeSelectionShortcut);
     const disposeScreenshotShortcut = registerScreenshotShortcut({
         shortcut: globalShortcut,
         onTrigger: () => {
-            for (const window of BrowserWindow.getAllWindows())
-                window.webContents.send(screenshotIpcChannels.shortcut);
+            if (!petWindow.isDestroyed()) {
+                void screenshotOverlay.open(petWindow.webContents).catch(
+                    () => undefined
+                );
+            }
         }
     });
-    app.on('will-quit', disposeScreenshotShortcut);
-    const window = createWindow();
-    if (runSmokeModeIfEnabled(window))
-        return;
+    app.on('will-quit', () => {
+        disposeSelectionShortcut();
+        disposeScreenshotShortcut();
+        screenshotOverlay.dispose();
+    });
 
     app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0)
-            createWindow();
+        if (BrowserWindow.getAllWindows().length === 0) {
+            petWindow = createWindow();
+        }
     });
 });
 

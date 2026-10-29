@@ -14,6 +14,12 @@ import {
     type ScreenshotIpcService
 } from '../../src/main/ipcRouter';
 import {
+    ScreenshotOverlayController,
+    type ScreenshotOverlayOwner,
+    type ScreenshotOverlayWindowLike,
+    type ScreenshotOverlayWindowOptions
+} from '../../src/main/screenshotOverlay';
+import {
     OpenAiClient,
     ProviderError
 } from '../../src/main/services/openAiClient';
@@ -565,5 +571,177 @@ describe('screenshot translation', () => {
             unexpected: true
         }).success).toBe(false);
         expect(screenshot.translateScreenshot).not.toHaveBeenCalled();
+    });
+
+    it('opens and closes the virtual-desktop selection surface before capture', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const order: string[] = [];
+        let windowOptions: ScreenshotOverlayWindowOptions | undefined;
+        let closedListener: (() => void) | undefined;
+        const overlayWindow: ScreenshotOverlayWindowLike = {
+            loadURL: vi.fn(async () => {
+                order.push('load');
+            }),
+            show: vi.fn(() => {
+                order.push('show');
+            }),
+            focus: vi.fn(() => {
+                order.push('focus');
+            }),
+            close: vi.fn(() => {
+                order.push('close');
+                closedListener?.();
+            }),
+            isDestroyed: vi.fn(() => false),
+            once: vi.fn((
+                event: 'closed',
+                listener: () => void
+            ) => {
+                if (event === 'closed')
+                    closedListener = listener;
+            })
+        };
+        const screenshot = {
+            translateScreenshot: vi.fn(async (
+                bounds: ScreenBounds
+            ): Promise<TranslationTask> => {
+                void bounds;
+                return {
+                    id: 'overlay-task',
+                    status: 'completed',
+                    sourceText: 'Screenshot region',
+                    translatedText: 'translated',
+                    targetLanguage: 'zh-CN'
+                };
+            })
+        };
+        const owner: ScreenshotOverlayOwner = {
+            send: vi.fn((channel: string, payload: unknown) => {
+                order.push(`send:${channel}`);
+                if (channel === screenshotIpcChannels.selected) {
+                    const bounds = (payload as { bounds: ScreenBounds }).bounds;
+                    order.push('translate');
+                    void screenshot.translateScreenshot(bounds);
+                }
+            })
+        };
+        const controller = new ScreenshotOverlayController({
+            ipcMain,
+            overlayUrl: 'file:///overlay',
+            getDisplays: () => [
+                { x: -1_920, y: -200, width: 1_920, height: 1_080 },
+                { x: 0, y: 0, width: 2_560, height: 1_440 }
+            ],
+            createWindow: (options) => {
+                windowOptions = options;
+                order.push('open');
+                return overlayWindow;
+            },
+            onSelected: (selectedBounds, selectedOwner) => {
+                selectedOwner.send(screenshotIpcChannels.selected, {
+                    bounds: selectedBounds
+                });
+            },
+            isSenderAuthorized: () => true
+        });
+        let trigger: (() => void) | undefined;
+        registerScreenshotShortcut({
+            shortcut: {
+                register: (_accelerator, listener) => {
+                    trigger = listener;
+                    return true;
+                },
+                unregister: vi.fn()
+            },
+            onTrigger: () => {
+                void controller.open(owner);
+            }
+        });
+
+        trigger?.();
+        await vi.waitFor(() => expect(windowOptions).toBeDefined());
+        await vi.waitFor(() => expect(overlayWindow.show).toHaveBeenCalledTimes(1));
+        const result = await handlers.get(screenshotIpcChannels.select)?.({}, {
+            bounds: {
+                x: -1_800,
+                y: -100,
+                width: 2_000,
+                height: 900
+            }
+        });
+
+        expect(result).toEqual({ ok: true });
+        expect(windowOptions?.bounds).toEqual({
+            x: -1_920,
+            y: -200,
+            width: 4_480,
+            height: 1_640
+        });
+        expect(order.indexOf('close')).toBeGreaterThan(-1);
+        expect(order.indexOf('send:desktop-pet:screenshot-selected')).toBeGreaterThan(
+            order.indexOf('close')
+        );
+        expect(order.indexOf('translate')).toBeGreaterThan(
+            order.indexOf('send:desktop-pet:screenshot-selected')
+        );
+        expect(screenshot.translateScreenshot).toHaveBeenCalledWith({
+            x: -1_800,
+            y: -100,
+            width: 2_000,
+            height: 900
+        });
+        controller.dispose();
+    });
+
+    it('closes the screenshot selection surface on cancel without capture', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        let closed = false;
+        const overlayWindow: ScreenshotOverlayWindowLike = {
+            loadURL: vi.fn(async () => undefined),
+            show: vi.fn(),
+            focus: vi.fn(),
+            close: vi.fn(() => {
+                closed = true;
+            }),
+            isDestroyed: vi.fn(() => closed),
+            once: vi.fn()
+        };
+        const onSelected = vi.fn();
+        const controller = new ScreenshotOverlayController({
+            ipcMain,
+            overlayUrl: 'file:///overlay',
+            getDisplays: () => [{
+                x: -1_920,
+                y: -200,
+                width: 1_920,
+                height: 1_080
+            }],
+            createWindow: () => overlayWindow,
+            onSelected,
+            isSenderAuthorized: () => true
+        });
+        await controller.open({ send: vi.fn() });
+
+        const result = await handlers.get(screenshotIpcChannels.cancelSelection)?.({}, {});
+
+        expect(result).toEqual({ ok: true });
+        expect(overlayWindow.close).toHaveBeenCalledTimes(1);
+        expect(onSelected).not.toHaveBeenCalled();
     });
 });
