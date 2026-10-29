@@ -6,6 +6,7 @@ interface SmokePayload {
     };
     requireIsUndefined: boolean;
     processIsUndefined: boolean;
+    mascotRenderMode?: string;
 }
 
 interface SmokeResult {
@@ -36,7 +37,10 @@ function exitWithError(error: unknown): void {
     });
 }
 
-async function collectSmokePayload(window: BrowserWindowType): Promise<SmokePayload> {
+async function collectSmokePayload(
+    window: BrowserWindowType,
+    scenario: string
+): Promise<SmokePayload> {
     const preflight = await Promise.race([
         window.webContents.executeJavaScript('({ pingType: typeof window.desktopPet?.ping })'),
         new Promise<never>((_resolve, reject) => {
@@ -65,6 +69,26 @@ async function collectSmokePayload(window: BrowserWindowType): Promise<SmokePayl
     ].filter((exposure): exposure is string => exposure !== undefined);
     if (exposures.length > 0)
         throw new Error(`Renderer smoke assertion failed: ${exposures.join(' and ')} must be undefined`);
+    if (scenario !== 'live2d-fallback')
+        return payload;
+    const mascotRenderMode = await Promise.race([
+        window.webContents.executeJavaScript(`new Promise((resolve) => {
+            const readStage = () => {
+                const stage = document.querySelector('[data-testid="live2d-stage"]');
+                resolve(stage?.getAttribute('data-render-mode') ?? 'missing');
+            };
+            readStage();
+            setTimeout(readStage, 250);
+        })`),
+        new Promise<string>((resolve) => {
+            setTimeout(() => resolve('missing'), 2_000);
+        })
+    ]);
+    if (typeof mascotRenderMode !== 'string')
+        throw new Error('Renderer smoke mascot render mode is invalid');
+    payload.mascotRenderMode = mascotRenderMode;
+    if (typeof payload.mascotRenderMode !== 'string')
+        throw new Error('Renderer smoke mascot render mode is invalid');
     return payload;
 }
 
@@ -75,7 +99,7 @@ export function runSmokeModeIfEnabled(window: BrowserWindowType): boolean {
 
     const run = () => {
         void (async () => {
-            const payload = await collectSmokePayload(window);
+            const payload = await collectSmokePayload(window, scenario);
             exitWithMarker({
                 scenario,
                 payload,

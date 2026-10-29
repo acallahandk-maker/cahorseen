@@ -3,7 +3,21 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta
+            content="default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; font-src 'self'"
+            http-equiv="Content-Security-Policy"
+        />
         <title>Desktop Pet Translator</title>
+        <style>
+            html,
+            body,
+            #root {
+                background: transparent;
+                height: 100%;
+                margin: 0;
+                width: 100%;
+            }
+        </style>
     </head>
     <body>
         <div id="root"></div>

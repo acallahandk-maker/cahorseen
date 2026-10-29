@@ -1,0 +1,64 @@
+{
+  "FixtureOnly": true,
+  "Version": {
+    "Major": 3,
+    "Minor": 0
+  },
+  "FileReferences": {
+    "Moc": "tiny.moc3",
+    "Textures": [
+      "tiny.png"
+    ],
+    "Motions": {
+      "Idle": [
+        {
+          "File": "idle.motion3.json"
+        }
+      ],
+      "Listen": [
+        {
+          "File": "listen.motion3.json"
+        }
+      ],
+      "Thinking": [
+        {
+          "File": "thinking.motion3.json"
+        }
+      ],
+      "Success": [
+        {
+          "File": "success.motion3.json"
+        }
+      ],
+      "Error": [
+        {
+          "File": "error.motion3.json"
+        }
+      ],
+      "Quiz": [
+        {
+          "File": "quiz.motion3.json"
+        }
+      ],
+      "Happy": [
+        {
+          "File": "happy.motion3.json"
+        }
+      ],
+      "Sad": [
+        {
+          "File": "sad.motion3.json"
+        }
+      ]
+    }
+  },
+  "Groups": [
+    {
+      "Name": "EyeBlink",
+      "Ids": [
+        "ParamEyeLOpen",
+        "ParamEyeROpen"
+      ]
+    }
+  ]
+}

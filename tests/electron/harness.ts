@@ -19,6 +19,7 @@ export interface ElectronSmokeResult {
         };
         requireIsUndefined: boolean;
         processIsUndefined: boolean;
+        mascotRenderMode?: string;
     };
     windowCount: number;
     url: string;
@@ -42,6 +43,11 @@ function parseSmokeResult(marker: string, expectedScenario: string): ElectronSmo
         throw new Error('Electron smoke marker require result is invalid');
     if (typeof value.payload.processIsUndefined !== 'boolean')
         throw new Error('Electron smoke marker process result is invalid');
+    if (
+        value.payload.mascotRenderMode !== undefined
+        && typeof value.payload.mascotRenderMode !== 'string'
+    )
+        throw new Error('Electron smoke marker mascot render mode is invalid');
     if (typeof value.windowCount !== 'number')
         throw new Error('Electron smoke marker windowCount is invalid');
     if (typeof value.url !== 'string')
@@ -54,7 +60,10 @@ function parseSmokeResult(marker: string, expectedScenario: string): ElectronSmo
                 version: value.payload.ping.version
             },
             requireIsUndefined: value.payload.requireIsUndefined,
-            processIsUndefined: value.payload.processIsUndefined
+            processIsUndefined: value.payload.processIsUndefined,
+            ...(typeof value.payload.mascotRenderMode === 'string'
+                ? { mascotRenderMode: value.payload.mascotRenderMode }
+                : {})
         },
         windowCount: value.windowCount,
         url: value.url

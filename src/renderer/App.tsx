@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
+    MascotEvent,
     ScreenBounds,
     TranslationEvent,
     TranslationTask
 } from '../shared/contracts';
+import PetWindow from './pet/PetWindow';
 import RegionSelector from './screenshot/RegionSelector';
 import TranslationBubble from './translation/TranslationBubble';
 import {
@@ -82,8 +84,15 @@ function PetApp(): React.JSX.Element {
         streamDelta: ''
     });
     const [screenshotBounds, setScreenshotBounds] = useState<ScreenBounds>();
+    const [mascotEvents, setMascotEvents] = useState<readonly MascotEvent[]>([]);
+    const [mascotBatchId, setMascotBatchId] = useState(0);
+    const emitMascotEvents = useCallback((events: readonly MascotEvent[]): void => {
+        setMascotEvents(events);
+        setMascotBatchId((current) => current + 1);
+    }, []);
     const startTranslation = useCallback(async (): Promise<void> => {
         setScreenshotBounds(undefined);
+        emitMascotEvents(['listening', 'thinking']);
         setTranslation({
             task: {
                 id: 'starting',
@@ -96,11 +105,13 @@ function PetApp(): React.JSX.Element {
         });
         try {
             const task = await window.desktopPet.translateSelection();
+            emitMascotEvents(['success']);
             setTranslation((current) => translationBubbleReducer(current, {
                 type: 'completed',
                 task
             }));
         } catch {
+            emitMascotEvents(['error']);
             setTranslation((current) => current.task.id === 'starting'
                 ? translationBubbleReducer(current, {
                     type: 'failed',
@@ -112,12 +123,13 @@ function PetApp(): React.JSX.Element {
                 })
                 : current);
         }
-    }, []);
+    }, [emitMascotEvents]);
 
     const startScreenshotTranslation = useCallback(async (
         bounds: ScreenBounds
     ): Promise<void> => {
         setScreenshotBounds(bounds);
+        emitMascotEvents(['listening', 'thinking']);
         setTranslation({
             task: {
                 id: 'screenshot-starting',
@@ -130,11 +142,13 @@ function PetApp(): React.JSX.Element {
         });
         try {
             const task = await window.desktopPet.translateScreenshot(bounds);
+            emitMascotEvents(['success']);
             setTranslation((current) => translationBubbleReducer(current, {
                 type: 'completed',
                 task
             }));
         } catch {
+            emitMascotEvents(['error']);
             setTranslation((current) => current.task.status === 'running'
                 ? translationBubbleReducer(current, {
                     type: 'failed',
@@ -146,7 +160,7 @@ function PetApp(): React.JSX.Element {
                 })
                 : current);
         }
-    }, []);
+    }, [emitMascotEvents]);
 
     const openScreenshotSelection = useCallback((): void => {
         void window.desktopPet.openScreenshotSelection().catch(() => undefined);
@@ -155,6 +169,10 @@ function PetApp(): React.JSX.Element {
     useEffect(() => {
         const removeEvents = window.desktopPet.onTranslationEvent((event) => {
             setTranslation((current) => translationBubbleReducer(current, event));
+            if (event.type === 'completed')
+                emitMascotEvents(['success']);
+            else if (event.type === 'failed')
+                emitMascotEvents(['error']);
         });
         const removeShortcut = window.desktopPet.onSelectionShortcut(() => {
             void startTranslation();
@@ -169,32 +187,34 @@ function PetApp(): React.JSX.Element {
             removeShortcut();
             removeScreenshotSelection();
         };
-    }, [startScreenshotTranslation, startTranslation]);
+    }, [emitMascotEvents, startScreenshotTranslation, startTranslation]);
 
     return (
-        <main>
-            <h1>Desktop Pet Translator</h1>
-            <button type="button" onClick={() => void startTranslation()}>
-                Translate selection
-            </button>
-            <button type="button" onClick={openScreenshotSelection}>
-                Translate screenshot
-            </button>
-            <TranslationBubble
-                task={translation.task}
-                streamDelta={translation.streamDelta}
-                onCopy={() => void navigator.clipboard?.writeText(
-                    translation.task.translatedText
-                )}
-                onRetry={() => {
-                    if (screenshotBounds !== undefined)
-                        void startScreenshotTranslation(screenshotBounds);
-                    else
-                        void startTranslation();
-                }}
-                onCancel={() => void window.desktopPet.cancelTranslation(translation.task.id)}
-            />
-        </main>
+        <PetWindow eventBatch={mascotEvents} eventBatchId={mascotBatchId}>
+            <main>
+                <h1>Desktop Pet Translator</h1>
+                <button type="button" onClick={() => void startTranslation()}>
+                    Translate selection
+                </button>
+                <button type="button" onClick={openScreenshotSelection}>
+                    Translate screenshot
+                </button>
+                <TranslationBubble
+                    task={translation.task}
+                    streamDelta={translation.streamDelta}
+                    onCopy={() => void navigator.clipboard?.writeText(
+                        translation.task.translatedText
+                    )}
+                    onRetry={() => {
+                        if (screenshotBounds !== undefined)
+                            void startScreenshotTranslation(screenshotBounds);
+                        else
+                            void startTranslation();
+                    }}
+                    onCancel={() => void window.desktopPet.cancelTranslation(translation.task.id)}
+                />
+            </main>
+        </PetWindow>
     );
 }
 

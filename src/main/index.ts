@@ -38,6 +38,14 @@ function createWindow(): BrowserWindow {
     const window = new BrowserWindow({
         width: 960,
         height: 640,
+        alwaysOnTop: true,
+        backgroundColor: '#00000000',
+        frame: false,
+        fullscreenable: false,
+        hasShadow: false,
+        resizable: false,
+        skipTaskbar: true,
+        transparent: true,
         webPreferences: {
             contextIsolation: true,
             nodeIntegration: false,
