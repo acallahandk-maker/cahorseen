@@ -7,6 +7,7 @@ interface SmokePayload {
     requireIsUndefined: boolean;
     processIsUndefined: boolean;
     mascotRenderMode?: string;
+    live2D?: unknown;
 }
 
 interface SmokeResult {
@@ -69,6 +70,47 @@ async function collectSmokePayload(
     ].filter((exposure): exposure is string => exposure !== undefined);
     if (exposures.length > 0)
         throw new Error(`Renderer smoke assertion failed: ${exposures.join(' and ')} must be undefined`);
+    if (scenario === 'live2d-real') {
+        const diagnostics = await Promise.race([
+            window.webContents.executeJavaScript(`(async () => {
+                const deadline = Date.now() + 10000;
+                let api;
+                while (!(api = window.__desktopPetLive2DSmoke)) {
+                    if (Date.now() > deadline) {
+                        const stage = document.querySelector('[data-testid="live2d-stage"]');
+                        throw new Error('Live2D smoke API timed out: '
+                            + (stage?.getAttribute('data-render-error') ?? 'unknown'));
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, 50));
+                }
+                for (const state of [
+                    'thinking',
+                    'success',
+                    'error',
+                    'quizzing',
+                    'happy',
+                    'sad'
+                ])
+                    await api.setState(state);
+                api.interact();
+                return {
+                    mascotRenderMode: document.querySelector(
+                        '[data-testid="live2d-stage"]'
+                    )?.getAttribute('data-render-mode') ?? 'missing',
+                    live2D: api.snapshot()
+                };
+            })()`),
+            new Promise<never>((_resolve, reject) => {
+                setTimeout(() => reject(new Error('Renderer Live2D smoke timed out')), 12_000);
+            })
+        ]) as {
+            mascotRenderMode: string;
+            live2D: unknown;
+        };
+        payload.mascotRenderMode = diagnostics.mascotRenderMode;
+        payload.live2D = diagnostics.live2D;
+        return payload;
+    }
     if (scenario !== 'live2d-fallback')
         return payload;
     const mascotRenderMode = await Promise.race([

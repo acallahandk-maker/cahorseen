@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -41,15 +42,29 @@ const fixturePath = fileURLToPath(new URL(
 interface FakeModel {
     anchor: { set: ReturnType<typeof vi.fn> };
     position: { set: ReturnType<typeof vi.fn> };
+    scale: { set: ReturnType<typeof vi.fn> };
     visible: boolean;
     autoUpdate: boolean;
     autoInteract: boolean;
+    interactive: boolean;
+    textures: unknown[];
     motion: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
+    tap: ReturnType<typeof vi.fn>;
+    hitTest: ReturnType<typeof vi.fn>;
+    on: ReturnType<typeof vi.fn>;
     destroy: ReturnType<typeof vi.fn>;
     internalModel: {
+        width: number;
+        height: number;
+        hitAreas: Record<string, unknown>;
+        motionManager: {
+            definitions: Record<string, unknown>;
+        };
         coreModel: {
             setParameterValueById: ReturnType<typeof vi.fn>;
+            getParameterCount: ReturnType<typeof vi.fn>;
         };
         destroy: ReturnType<typeof vi.fn>;
     };
@@ -59,15 +74,38 @@ function createFakeModel(): FakeModel {
     return {
         anchor: { set: vi.fn() },
         position: { set: vi.fn() },
+        scale: { set: vi.fn() },
         visible: true,
         autoUpdate: false,
-        autoInteract: false,
+        autoInteract: true,
+        interactive: true,
+        textures: [],
         motion: vi.fn().mockResolvedValue(true),
         update: vi.fn(),
+        focus: vi.fn(),
+        tap: vi.fn(),
+        hitTest: vi.fn().mockReturnValue(['Head']),
+        on: vi.fn(),
         destroy: vi.fn(),
         internalModel: {
+            width: 100,
+            height: 100,
+            hitAreas: { Head: {}, Body: {} },
+            motionManager: {
+                definitions: {
+                    Idle: [],
+                    Listen: [],
+                    Thinking: [],
+                    Success: [],
+                    Error: [],
+                    Quiz: [],
+                    Happy: [],
+                    Sad: []
+                }
+            },
             coreModel: {
-                setParameterValueById: vi.fn()
+                setParameterValueById: vi.fn(),
+                getParameterCount: vi.fn().mockReturnValue(8)
             },
             destroy: vi.fn()
         }
@@ -79,6 +117,27 @@ function fixtureResponse(body: unknown): Response {
         status: 200,
         headers: { 'content-type': 'application/json' }
     });
+}
+
+interface MutableManifest {
+    FileReferences: {
+        [key: string]: unknown;
+    };
+}
+
+function loadFixtureManifest(): MutableManifest {
+    return JSON.parse(readFileSync(fixturePath, 'utf8')) as MutableManifest;
+}
+
+interface Live2DAssetManifest {
+    core: {
+        archiveSha256: string;
+        outputSha256: string;
+    };
+    model: {
+        archiveSha256: string;
+        sourceTreeSha256: string;
+    };
 }
 
 const expectedStateCues = {
@@ -174,6 +233,41 @@ beforeEach(() => {
 });
 
 describe('Live2D mascot smoke', () => {
+    it('provisions checksum-verified official Cubism runtime and full model assets', async () => {
+        const lockPath = fileURLToPath(new URL(
+            '../../config/live2d-assets.lock.json',
+            import.meta.url
+        ));
+        const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as Live2DAssetManifest;
+
+        expect(lock.core.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
+        expect(lock.core.outputSha256).toMatch(/^[a-f0-9]{64}$/);
+        expect(lock.model.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
+        expect(lock.model.sourceTreeSha256).toMatch(/^[a-f0-9]{64}$/);
+
+        const provision = await new Promise<{ code: number | null; stderr: string }>(
+            (resolve, reject) => {
+                const child = spawn(process.execPath, [
+                    'scripts/provision-live2d-assets.mjs',
+                    '--verify'
+                ], {
+                    cwd: fileURLToPath(new URL('../..', import.meta.url)),
+                    stdio: ['ignore', 'ignore', 'pipe']
+                });
+                let stderr = '';
+                child.stderr.setEncoding('utf8');
+                child.stderr.on('data', (chunk: string) => {
+                    stderr += chunk;
+                });
+                child.once('error', reject);
+                child.once('close', (code) => resolve({ code, stderr }));
+            }
+        );
+
+        expect(provision.stderr).toBe('');
+        expect(provision.code).toBe(0);
+    });
+
     it('loads and validates the tiny synthetic model fixture', async () => {
         const model = createFakeModel();
         mocks.modelFrom.mockResolvedValue(model);
@@ -189,8 +283,10 @@ describe('Live2D mascot smoke', () => {
         expect(fetch).toHaveBeenCalledWith(fixtureUrl, expect.anything());
         expect(mocks.modelFrom).toHaveBeenCalledWith(fixtureUrl, {
             autoUpdate: false,
-            autoInteract: false
+            autoInteract: true
         });
+        expect(model.autoInteract).toBe(true);
+        expect(model.interactive).toBe(true);
     });
 
     it.each([
@@ -246,6 +342,36 @@ describe('Live2D mascot smoke', () => {
             .rejects.toThrow('Model path must stay inside the model directory');
     });
 
+    it.each([
+        { name: 'moc', field: 'Moc', value: '../outside.moc3' },
+        { name: 'textures', field: 'Textures', value: '../outside.png' },
+        { name: 'physics', field: 'Physics', value: 'https://example.test/outside.physics3.json' },
+        { name: 'pose', field: 'Pose', value: '%2e%2e/outside.pose3.json' },
+        { name: 'display info', field: 'DisplayInfo', value: '/outside.cdi3.json' },
+        { name: 'user data', field: 'UserData', value: '../outside.userdata3.json' },
+        { name: 'expressions', field: 'Expressions', value: '../../outside.exp3.json' },
+        { name: 'motions', field: 'Motions', value: 'file:outside.motion3.json' },
+        { name: 'sounds', field: 'Sounds', value: 'https://example.test/outside.wav' }
+    ])('rejects unsafe $name manifest references', async ({ field, value }) => {
+        const manifest = loadFixtureManifest();
+        if (field === 'Textures')
+            manifest.FileReferences.Textures = [value];
+        else if (field === 'Expressions')
+            (manifest.FileReferences.Expressions as Array<{ File: string }>)[0].File = value;
+        else if (field === 'Motions')
+            (manifest.FileReferences.Motions as Record<string, Array<{ File: string }>>)
+                .Thinking[0].File = value;
+        else if (field === 'Sounds')
+            (manifest.FileReferences.Motions as Record<string, Array<{ Sound?: string }>>)
+                .Sad[0].Sound = value;
+        else
+            manifest.FileReferences[field] = value;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(fixtureResponse(manifest)));
+
+        await expect(loadMascotModel(fixtureUrl))
+            .rejects.toThrow(/(?:local|relative|escapes|encoding)/);
+    });
+
     it('rejects model manifests missing deterministic action layers', async () => {
         const manifest = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
             FileReferences: {
@@ -279,11 +405,56 @@ describe('Live2D mascot smoke', () => {
         expect(ticker.stop).toHaveBeenCalledTimes(2);
     });
 
-    it('boots the Electron pet with the static mascot fallback', async () => {
-        const result = await runElectronSmoke('live2d-fallback');
+    it('boots the Electron pet with a real interactive Cubism model', async () => {
+        const result = await runElectronSmoke('live2d-real');
+        const live2d = (result.payload as {
+            live2D?: {
+                licenseNoticePresent: boolean;
+                model: {
+                    autoInteract: boolean;
+                    parameterCount: number;
+                    textureCount: number;
+                    motionGroupCount: number;
+                    hitAreas: string[];
+                };
+                canvas: {
+                    nonTransparentPixels: number;
+                    distinctColors: number;
+                };
+                interaction: {
+                    hitAreas: string[];
+                    tapCount: number;
+                };
+                stateMappings: Array<{
+                    state: string;
+                    action: string;
+                    parameters: Record<string, number>;
+                    motionStarted: boolean;
+                }>;
+            };
+        }).live2D;
 
         expect(result.windowCount).toBe(1);
         expect((result.payload as { mascotRenderMode?: unknown }).mascotRenderMode)
-            .toBe('static-fallback');
-    });
+            .toBe('live2d');
+        expect(live2d).toBeDefined();
+        expect(live2d?.licenseNoticePresent).toBe(true);
+        expect(live2d?.model.autoInteract).toBe(true);
+        expect(live2d?.model.parameterCount).toBeGreaterThanOrEqual(30);
+        expect(live2d?.model.textureCount).toBeGreaterThanOrEqual(2);
+        expect(live2d?.model.motionGroupCount).toBeGreaterThanOrEqual(8);
+        expect(live2d?.model.hitAreas).toContain('Head');
+        expect(live2d?.canvas.nonTransparentPixels).toBeGreaterThan(1_000);
+        expect(live2d?.canvas.distinctColors).toBeGreaterThan(16);
+        expect(live2d?.interaction.hitAreas).toContain('Head');
+        expect(live2d?.interaction.tapCount).toBeGreaterThan(0);
+        expect(live2d?.stateMappings).toEqual(
+            Object.entries(expectedStateCues).map(([state, cue]) => ({
+                state,
+                action: cue.action,
+                parameters: cue.parameters,
+                motionStarted: true
+            }))
+        );
+    }, 20_000);
 });

@@ -31,31 +31,24 @@ function isPerformanceMode(input: PerformanceInput): input is PerformanceMode {
 }
 
 function reasonFromContext(context: PerformanceContext): PerformanceReason {
-    if (context.reason !== undefined)
-        return context.reason;
     if (context.paused === true || context.obscured === true)
         return 'paused';
-    if (context.fullscreen === true)
-        return 'fullscreen';
+    if (context.reason === 'paused' || context.reason === 'fullscreen')
+        return context.reason;
     if (context.hidden === true)
         return 'hidden';
     if (context.battery === true)
         return 'battery';
     if (context.idle === true)
         return 'idle';
-    return 'normal';
+    if (context.fullscreen === true)
+        return 'fullscreen';
+    return context.reason ?? 'normal';
 }
 
 export function resolvePerformanceMode(input: PerformanceInput): PerformanceMode {
     if (isPerformanceMode(input))
         return input;
-    if (input.reason !== undefined) {
-        return {
-            reason: input.reason,
-            frameRate: frameRateByReason[input.reason],
-            suppressed: input.suppressed === true || input.obscured === true
-        };
-    }
 
     const reason = reasonFromContext(input);
     return {
@@ -63,8 +56,7 @@ export function resolvePerformanceMode(input: PerformanceInput): PerformanceMode
         frameRate: frameRateByReason[reason],
         suppressed: input.suppressed === true
             || input.obscured === true
-            || reason === 'paused'
-            || reason === 'fullscreen'
+            || (input.reason === undefined && (reason === 'paused' || reason === 'fullscreen'))
     };
 }
 

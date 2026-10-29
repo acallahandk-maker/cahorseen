@@ -11,6 +11,31 @@ type ElectronSmokeProcess = ChildProcessByStdio<null, Readable, Readable>;
 const nodeExposureScenario = 'app-smoke-node-exposure';
 const nodeExposureRendererUrl = 'data:text/html,<script>window.require = {}; window.process = {};</script>';
 
+export interface Live2DSmokeDiagnostic {
+    licenseNoticePresent: boolean;
+    model: {
+        autoInteract: boolean;
+        parameterCount: number;
+        textureCount: number;
+        motionGroupCount: number;
+        hitAreas: string[];
+    };
+    canvas: {
+        nonTransparentPixels: number;
+        distinctColors: number;
+    };
+    interaction: {
+        hitAreas: string[];
+        tapCount: number;
+    };
+    stateMappings: Array<{
+        state: string;
+        action: string;
+        parameters: Record<string, number>;
+        motionStarted: boolean;
+    }>;
+}
+
 export interface ElectronSmokeResult {
     scenario: string;
     payload: {
@@ -20,6 +45,7 @@ export interface ElectronSmokeResult {
         requireIsUndefined: boolean;
         processIsUndefined: boolean;
         mascotRenderMode?: string;
+        live2D?: Live2DSmokeDiagnostic;
     };
     windowCount: number;
     url: string;
@@ -27,6 +53,77 @@ export interface ElectronSmokeResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null;
+}
+
+function stringArray(value: unknown): string[] {
+    if (!Array.isArray(value) || value.some((item) => typeof item !== 'string'))
+        throw new Error('Electron Live2D smoke string array is invalid');
+    return [...value] as string[];
+}
+
+function numberRecord(value: unknown): Record<string, number> {
+    if (!isRecord(value) || Object.values(value).some((item) => typeof item !== 'number'))
+        throw new Error('Electron Live2D smoke parameter record is invalid');
+    return { ...value } as Record<string, number>;
+}
+
+function parseLive2DSmoke(value: unknown): Live2DSmokeDiagnostic {
+    if (
+        !isRecord(value)
+        || typeof value.licenseNoticePresent !== 'boolean'
+        || !isRecord(value.model)
+        || !isRecord(value.canvas)
+    )
+        throw new Error('Electron Live2D smoke diagnostic is invalid');
+    if (!isRecord(value.interaction) || !Array.isArray(value.stateMappings))
+        throw new Error('Electron Live2D smoke diagnostic is incomplete');
+    if (
+        typeof value.model.autoInteract !== 'boolean'
+        || typeof value.model.parameterCount !== 'number'
+        || typeof value.model.textureCount !== 'number'
+        || typeof value.model.motionGroupCount !== 'number'
+        || typeof value.canvas.nonTransparentPixels !== 'number'
+        || typeof value.canvas.distinctColors !== 'number'
+        || typeof value.interaction.tapCount !== 'number'
+        || typeof value.interaction.hitAreas === 'undefined'
+        || typeof value.model.hitAreas === 'undefined'
+    )
+        throw new Error('Electron Live2D smoke diagnostic values are invalid');
+
+    const stateMappings = value.stateMappings.map((mapping) => {
+        if (
+            !isRecord(mapping)
+            || typeof mapping.state !== 'string'
+            || typeof mapping.action !== 'string'
+            || typeof mapping.motionStarted !== 'boolean'
+        )
+            throw new Error('Electron Live2D smoke state mapping is invalid');
+        return {
+            state: mapping.state,
+            action: mapping.action,
+            parameters: numberRecord(mapping.parameters),
+            motionStarted: mapping.motionStarted
+        };
+    });
+    return {
+        licenseNoticePresent: value.licenseNoticePresent,
+        model: {
+            autoInteract: value.model.autoInteract,
+            parameterCount: value.model.parameterCount,
+            textureCount: value.model.textureCount,
+            motionGroupCount: value.model.motionGroupCount,
+            hitAreas: stringArray(value.model.hitAreas)
+        },
+        canvas: {
+            nonTransparentPixels: value.canvas.nonTransparentPixels,
+            distinctColors: value.canvas.distinctColors
+        },
+        interaction: {
+            hitAreas: stringArray(value.interaction.hitAreas),
+            tapCount: value.interaction.tapCount
+        },
+        stateMappings
+    };
 }
 
 function parseSmokeResult(marker: string, expectedScenario: string): ElectronSmokeResult {
@@ -48,6 +145,9 @@ function parseSmokeResult(marker: string, expectedScenario: string): ElectronSmo
         && typeof value.payload.mascotRenderMode !== 'string'
     )
         throw new Error('Electron smoke marker mascot render mode is invalid');
+    const live2D = value.payload.live2D === undefined
+        ? undefined
+        : parseLive2DSmoke(value.payload.live2D);
     if (typeof value.windowCount !== 'number')
         throw new Error('Electron smoke marker windowCount is invalid');
     if (typeof value.url !== 'string')
@@ -63,7 +163,8 @@ function parseSmokeResult(marker: string, expectedScenario: string): ElectronSmo
             processIsUndefined: value.payload.processIsUndefined,
             ...(typeof value.payload.mascotRenderMode === 'string'
                 ? { mascotRenderMode: value.payload.mascotRenderMode }
-                : {})
+                : {}),
+            ...(live2D === undefined ? {} : { live2D })
         },
         windowCount: value.windowCount,
         url: value.url
@@ -104,9 +205,16 @@ export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeR
 
     try {
         return await new Promise<ElectronSmokeResult>((resolve, reject) => {
+            const rendererArguments = scenario === 'live2d-real'
+                ? [
+                    '--use-gl=angle',
+                    '--use-angle=swiftshader',
+                    '--enable-unsafe-swiftshader'
+                ]
+                : ['--disable-gpu'];
             const child = spawn(electronPath, [
-                '--disable-gpu',
                 '--no-sandbox',
+                ...rendererArguments,
                 `--user-data-dir=${userDataDir}`,
                 projectRoot
             ], {

@@ -9,6 +9,16 @@
     "Textures": [
       "tiny.png"
     ],
+    "Physics": "tiny.physics3.json",
+    "Pose": "tiny.pose3.json",
+    "DisplayInfo": "tiny.cdi3.json",
+    "UserData": "tiny.userdata3.json",
+    "Expressions": [
+      {
+        "Name": "F01",
+        "File": "expressions/F01.exp3.json"
+      }
+    ],
     "Motions": {
       "Idle": [
         {
@@ -47,7 +57,8 @@
       ],
       "Sad": [
         {
-          "File": "sad.motion3.json"
+          "File": "sad.motion3.json",
+          "Sound": "sounds/sad.wav"
         }
       ]
     }

@@ -28,6 +28,16 @@ describe('performanceGovernor', () => {
         expect(shouldPauseLoop({ reason: 'normal', suppressed: true })).toBe(true);
     });
 
+    it('keeps hidden state authoritative over an explicit normal reason', () => {
+        expect(resolvePerformanceMode({ reason: 'normal', hidden: true })).toEqual({
+            reason: 'hidden',
+            frameRate: 10,
+            suppressed: false
+        });
+        expect(targetFrameRate({ reason: 'normal', hidden: true })).toBe(10);
+        expect(shouldPauseLoop({ reason: 'normal', hidden: true })).toBe(true);
+    });
+
     it('treats obscured rendering as suppressed and paused', () => {
         expect(resolvePerformanceMode({ obscured: true })).toEqual({
             reason: 'paused',

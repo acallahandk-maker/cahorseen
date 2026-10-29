@@ -11,11 +11,14 @@
     "build": "electron-vite build",
     "dev": "electron-vite dev",
     "lint": "eslint .",
+    "prebuild": "node scripts/provision-live2d-assets.mjs",
+    "predev": "node scripts/provision-live2d-assets.mjs",
     "start": "electron-vite preview",
     "test": "npm run build && vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
+    "@pixi/unsafe-eval": "^5.3.12",
     "pixi-live2d-display": "0.3.1",
     "pixi.js": "5.3.12",
     "react": "19.3.1",

@@ -24,7 +24,8 @@ function nextMascotState(current: MascotState, event: MascotEvent): MascotState 
 }
 
 export default function PetWindow({
-    modelPath = import.meta.env.VITE_LIVE2D_MODEL_PATH ?? '/live2d/model.model3.json',
+    modelPath = import.meta.env.VITE_LIVE2D_MODEL_PATH
+        ?? '/live2d/models/Haru/Haru.model3.json',
     eventBatch = emptyMascotEvents,
     eventBatchId = 0,
     performance,
@@ -87,14 +88,27 @@ export default function PetWindow({
                 position: 'fixed',
                 inset: 0,
                 width: '100%',
-                WebkitAppRegion: 'drag'
-            } as React.CSSProperties & { WebkitAppRegion: 'drag' }}
+                WebkitAppRegion: 'no-drag'
+            } as React.CSSProperties & { WebkitAppRegion: 'no-drag' }}
         >
             <Live2DStage
                 modelPath={modelPath}
                 onRenderModeChange={handleRenderModeChange}
                 performance={effectivePerformance}
                 state={mascotState}
+            />
+            <div
+                aria-label="Drag pet window"
+                data-testid="pet-drag-handle"
+                style={{
+                    height: 32,
+                    left: 0,
+                    pointerEvents: 'auto',
+                    position: 'absolute',
+                    right: 0,
+                    top: 0,
+                    WebkitAppRegion: 'drag'
+                } as React.CSSProperties & { WebkitAppRegion: 'drag' }}
             />
             <div
                 style={{
@@ -116,6 +130,9 @@ export default function PetWindow({
                 } as React.CSSProperties & { WebkitAppRegion: 'no-drag' }}
             >
                 {children}
+                <small>
+                    This content uses sample data owned and copyrighted by Live2D Inc.
+                </small>
             </div>
         </div>
     );

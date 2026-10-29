@@ -4,7 +4,10 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
     {
-        ignores: ['out/**']
+        ignores: [
+            'out/**',
+            'src/renderer/public/live2d/**'
+        ]
     },
     {
         files: ['**/*.{js,mjs,cjs,ts,tsx}'],

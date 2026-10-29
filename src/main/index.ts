@@ -34,6 +34,15 @@ import {
 
 const pingChannel = 'desktop-pet:ping';
 
+function getRendererUrl(): string {
+    const url = new URL(
+        process.env.ELECTRON_RENDERER_URL ?? getProductionRendererFileUrl()
+    );
+    if (process.env.DESKTOP_PET_SMOKE_SCENARIO === 'live2d-real')
+        url.searchParams.set('live2d-smoke', '1');
+    return url.href;
+}
+
 function createWindow(): BrowserWindow {
     const window = new BrowserWindow({
         width: 960,
@@ -54,11 +63,7 @@ function createWindow(): BrowserWindow {
         }
     });
 
-    const rendererUrl = process.env.ELECTRON_RENDERER_URL;
-    if (rendererUrl)
-        void window.loadURL(rendererUrl);
-    else
-        void window.loadFile(join(__dirname, '../renderer/index.html'));
+    void window.loadURL(getRendererUrl());
 
     return window;
 }

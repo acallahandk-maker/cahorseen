@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "assetRoot": "src/renderer/public/live2d",
+  "core": {
+    "version": "04.02.0004",
+    "url": "https://cubism.live2d.com/sdk-web/bin/CubismSdkForWeb-4-r.7.zip",
+    "cacheName": "CubismSdkForWeb-4-r.7.zip",
+    "archiveSha256": "677c1cd27e28ec317c49e2db49acdb048523ee084d5ef5569ac7afc03628bd65",
+    "archiveRoot": "CubismSdkForWeb-4-r.7",
+    "member": "Core/live2dcubismcore.min.js",
+    "memberSha256": "0a3ee3db125c9aeccdcd85fce81b1174f7af47b3b681f0e7cc9038a711076007",
+    "outputPath": "live2dcubismcore.min.js",
+    "outputSha256": "0a3ee3db125c9aeccdcd85fce81b1174f7af47b3b681f0e7cc9038a711076007"
+  },
+  "model": {
+    "name": "Haru",
+    "sourceRepository": "https://github.com/Live2D/CubismWebSamples.git",
+    "sourceCommit": "b1de66b0b1f1cb881d95fb6158622aeb6a2827bd",
+    "url": "https://github.com/Live2D/CubismWebSamples/archive/b1de66b0b1f1cb881d95fb6158622aeb6a2827bd.zip",
+    "cacheName": "CubismWebSamples-b1de66b0b1f1cb881d95fb6158622aeb6a2827bd.zip",
+    "archiveSha256": "185facea379f29e19bcf99b3dac4e84c1674170b93258c3537d6577780156f1e",
+    "archiveRoot": "CubismWebSamples-b1de66b0b1f1cb881d95fb6158622aeb6a2827bd",
+    "sourceRoot": "Samples/Resources/Haru",
+    "sourceFileCount": 47,
+    "sourceTreeSha256": "0d189c904a12364293f4c98a6415c96611bf7e4d5c7c2a9c89407e9f8963a8bd",
+    "sourceManifestSha256": "5a41969802b8f9019ca731b07d918fc137e6a61eb9943bdd3f532aeaa0936f8c",
+    "outputPath": "models/Haru",
+    "outputFileCount": 43,
+    "outputTreeSha256": "640498f623cf8fc5c68799d0273311d4e41dba9cc5467d65db82929c0a1b87ac",
+    "outputManifestSha256": "3ebbb5106d6c680be3bc9b9b4f44a6fc3f9fadd2b98dd02a5c6acece1b31bc03",
+    "exclude": [
+      "sounds/"
+    ],
+    "modifications": [
+      "Replace Idle with haru_g_idle and add Listen, Thinking, Success, Error, Quiz, Happy, and Sad aliases to the listed Haru motions.",
+      "Remove TapBody Sound references and omit sounds/ from local build resources to keep desktop interaction silent."
+    ],
+    "stateMotionFiles": {
+      "Idle": "motions/haru_g_idle.motion3.json",
+      "Listen": "motions/haru_g_m15.motion3.json",
+      "Thinking": "motions/haru_g_m01.motion3.json",
+      "Success": "motions/haru_g_m02.motion3.json",
+      "Error": "motions/haru_g_m03.motion3.json",
+      "Quiz": "motions/haru_g_m04.motion3.json",
+      "Happy": "motions/haru_g_m05.motion3.json",
+      "Sad": "motions/haru_g_m06.motion3.json"
+    }
+  },
+  "coreLicenses": [
+    {
+      "member": "Core/LICENSE.md",
+      "sha256": "b81e37048010ef1d336106151201a0323c3309cae44aecdedf57831fe88fa991",
+      "outputPath": "licenses/CubismCore-LICENSE.md"
+    },
+    {
+      "member": "Core/RedistributableFiles.txt",
+      "sha256": "d16c123688299e1e69a7f5ebc01b3bd75a8d408c024002a7d35b2aae94003f8c",
+      "outputPath": "licenses/CubismCore-RedistributableFiles.txt"
+    }
+  ],
+  "remoteLicenses": [
+    {
+      "name": "Live2D Proprietary Software License",
+      "url": "https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html",
+      "sha256": "e7b4ffc6c636de2cfdd6d2eed6a4e43fa7034e7f15a0c3a15f1603dbb3b4c2b6",
+      "outputPath": "licenses/live2d-proprietary-software-license-agreement_en.html"
+    },
+    {
+      "name": "Live2D Free Material License Agreement",
+      "url": "https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html",
+      "sha256": "e7daa8a2a20b491fa9e530455a83faf8f4fe5876d7b85cf9d9ad1bcdddcbaf8f",
+      "outputPath": "licenses/live2d-free-material-license-agreement_en.html"
+    },
+    {
+      "name": "Terms of Use for Live2D Cubism Sample Data",
+      "url": "https://www.live2d.com/eula/live2d-sample-model-terms_en.html",
+      "sha256": "fbe62bce6bcca7f2457fd3d2cc1b0a4fb635ed87090519abdc1d4895fe51dae9",
+      "outputPath": "licenses/live2d-sample-model-terms_en.html"
+    }
+  ]
+}
