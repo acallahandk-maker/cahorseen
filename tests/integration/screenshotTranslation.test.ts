@@ -42,6 +42,7 @@ import { clipRegionSelection } from '../../src/renderer/screenshot/regionSelecti
 
 const bounds: ScreenBounds = { x: 0, y: 0, width: 10, height: 10 };
 const provider: ProviderConfig = {
+    id: 'synthetic-provider',
     name: 'Synthetic',
     baseUrl: 'https://provider.invalid/v1',
     apiKey: 'synthetic-key',
@@ -91,7 +92,13 @@ describe('screenshot translation', () => {
             status: 'completed',
             sourceText: 'Screenshot region',
             translatedText: 'translated',
-            targetLanguage: 'zh-CN'
+            sourceLanguage: 'und',
+            targetLanguage: 'zh-CN',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic',
+            textModel: 'text-model',
+            visionModel: 'vision-model',
+            translationModel: 'vision-model'
         });
         expect(runImage).toHaveBeenCalledTimes(1);
         expect(runImage.mock.calls[0][0]).toMatchObject({

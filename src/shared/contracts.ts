@@ -28,10 +28,36 @@ export function isValidHotkey(value: string): boolean {
     const modifiers = parts.slice(0, -1);
     const key = parts.at(-1);
     const allowedModifiers = ['Alt', 'Ctrl', 'Meta', 'Shift'];
+    const modifierAliases = ['Alt', 'Control', 'Meta', 'OS', 'Shift'];
     return key !== undefined
-        && !allowedModifiers.includes(key)
+        && !modifierAliases.includes(key)
         && modifiers.every((modifier) => allowedModifiers.includes(modifier))
         && new Set(modifiers).size === modifiers.length;
+}
+
+export function detectSourceLanguage(value: string): string {
+    if (/[\u3040-\u30ff]/u.test(value))
+        return 'ja';
+    if (/[\uac00-\ud7af]/u.test(value))
+        return 'ko';
+    if (/[\u4e00-\u9fff]/u.test(value))
+        return 'zh';
+    if (/[\u0400-\u04ff]/u.test(value))
+        return 'ru';
+    if (/[\u0600-\u06ff]/u.test(value))
+        return 'ar';
+    if (/[\u0590-\u05ff]/u.test(value))
+        return 'he';
+    if (/[\u0900-\u097f]/u.test(value))
+        return 'hi';
+    const normalized = value.trim().toLowerCase();
+    const englishMarkers = new Set([
+        'a', 'an', 'and', 'hello', 'i', 'is', 'of', 'the', 'this', 'to', 'you'
+    ]);
+    const words = normalized.split(/\s+/u);
+    if (words.some((word) => englishMarkers.has(word)))
+        return 'en';
+    return /^\p{ASCII}+$/u.test(value) && /[A-Za-z]/u.test(value) ? 'en' : 'und';
 }
 
 const httpsUrl = z.string().url().refine(isHttpsUrl, {
@@ -213,7 +239,13 @@ export const translationTaskSchema = z.strictObject({
     status: translationStatusSchema,
     sourceText: nonEmptyString,
     translatedText: z.string(),
+    sourceLanguage: nonEmptyString.max(64).optional(),
     targetLanguage: nonEmptyString,
+    providerId: nonEmptyString.optional(),
+    providerName: nonEmptyString.optional(),
+    textModel: nonEmptyString.optional(),
+    visionModel: nonEmptyString.optional(),
+    translationModel: nonEmptyString.optional(),
     error: z.string().optional(),
     errorCode: translationErrorCodeSchema.optional()
 });
@@ -250,6 +282,7 @@ export const translationEventSchema = z.discriminatedUnion('type', [
 ]);
 
 export const translationStartSchema = z.strictObject({
+    sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS).optional()
 });
 
 export const translationCancelSchema = z.strictObject({

@@ -403,6 +403,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     taskId,
                     signal: controller.signal,
                     onTaskId,
+                    sourceText: parsed.data.sourceText,
                     onDelta: (delta) => {
                         if (taskId !== undefined) {
                             sendEvent(event, {

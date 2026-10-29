@@ -466,10 +466,11 @@ export class ScreenshotService {
         options.onTaskId?.(taskId);
         const sourceText = 'Screenshot region';
         let targetLanguage = 'und';
+        let provider: ProviderConfig | undefined;
         let image: CapturedImage | undefined;
 
         try {
-            const provider = await this.getProvider();
+            provider = await this.getProvider();
             const requestedLanguage = options.targetLanguage ?? provider.targetLanguage ?? '';
             if (
                 requestedLanguage.length === 0
@@ -493,7 +494,13 @@ export class ScreenshotService {
                 status: 'completed',
                 sourceText,
                 translatedText: result.translatedText,
-                targetLanguage
+                sourceLanguage: 'und',
+                targetLanguage,
+                ...(provider.id === undefined ? {} : { providerId: provider.id }),
+                providerName: provider.name,
+                textModel: provider.textModel,
+                visionModel: provider.visionModel,
+                translationModel: result.model
             };
         } catch (error) {
             return {
@@ -501,7 +508,14 @@ export class ScreenshotService {
                 status: 'failed',
                 sourceText,
                 translatedText: '',
+                sourceLanguage: 'und',
                 targetLanguage,
+                ...(provider?.id === undefined ? {} : { providerId: provider.id }),
+                ...(provider === undefined ? {} : {
+                    providerName: provider.name,
+                    textModel: provider.textModel,
+                    visionModel: provider.visionModel
+                }),
                 error: safeTaskError(error),
                 errorCode: safeTaskErrorCode(error)
             };

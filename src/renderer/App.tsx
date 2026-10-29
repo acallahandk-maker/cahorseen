@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
     MascotEvent,
     ScreenBounds,
+    TranslationError,
     TranslationEvent,
     TranslationTask
 } from '../shared/contracts';
+import { translationErrorCodeSchema } from '../shared/contracts';
 import PetWindow from './pet/PetWindow';
 import RegionSelector from './screenshot/RegionSelector';
 import SettingsWindow from './settings/SettingsWindow';
@@ -17,11 +19,16 @@ import {
 interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
     captureSelectionOnce: () => Promise<unknown>;
-    translateSelection: () => Promise<TranslationTask>;
+    translateSelection: (options?: { sourceText?: string }) => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     openSettings: () => Promise<void>;
     copyTranslation: (text: string) => Promise<void>;
     speakTranslation: (text: string) => void;
+    retryTranslation: (
+        request:
+            | { kind: 'selection'; sourceText: string }
+            | { kind: 'screenshot'; bounds: ScreenBounds }
+    ) => Promise<TranslationTask>;
     cancelTranslation: (taskId: string) => Promise<void>;
     openScreenshotSelection: () => Promise<void>;
     getScreenshotOverlayViewport: () => Promise<ScreenBounds>;
@@ -46,6 +53,14 @@ function isScreenshotOverlayMode(): boolean {
 
 function isSettingsMode(): boolean {
     return new URLSearchParams(window.location.search).get('settings') === '1';
+}
+
+function toTranslationError(error: unknown, fallbackMessage: string): TranslationError {
+    const candidateCode = (error as { code?: unknown } | null)?.code;
+    const parsedCode = translationErrorCodeSchema.safeParse(candidateCode);
+    if (parsedCode.success && error instanceof Error)
+        return { code: parsedCode.data, message: error.message };
+    return { code: 'request-failed', message: fallbackMessage };
 }
 
 function ScreenshotOverlay(): React.JSX.Element | null {
@@ -91,85 +106,142 @@ function PetApp(): React.JSX.Element {
         },
         streamDelta: ''
     });
-    const [screenshotBounds, setScreenshotBounds] = useState<ScreenBounds>();
-    const [pinned, setPinned] = useState(false);
+    const [translationBusy, setTranslationBusy] = useState(false);
+    const translationBusyRef = useRef(false);
+    const screenshotBoundsByTaskId = useRef(new Map<string, ScreenBounds>());
     const [mascotEvents, setMascotEvents] = useState<readonly MascotEvent[]>([]);
     const [mascotBatchId, setMascotBatchId] = useState(0);
     const emitMascotEvents = useCallback((events: readonly MascotEvent[]): void => {
         setMascotEvents(events);
         setMascotBatchId((current) => current + 1);
     }, []);
-    const startTranslation = useCallback(async (): Promise<void> => {
-        setScreenshotBounds(undefined);
-        emitMascotEvents(['listening', 'thinking']);
-        setTranslation({
-            task: {
-                id: 'starting',
-                status: 'running',
-                sourceText: 'Capturing selected text',
-                translatedText: '',
-                targetLanguage: 'und'
-            },
-            streamDelta: ''
-        });
+    const runTranslationExclusive = useCallback(async (
+        operation: () => Promise<void>
+    ): Promise<void> => {
+        if (translationBusyRef.current)
+            return;
+        translationBusyRef.current = true;
+        setTranslationBusy(true);
         try {
-            const task = await window.desktopPet.translateSelection();
-            emitMascotEvents(['success']);
-            setTranslation((current) => translationBubbleReducer(current, {
-                type: 'completed',
-                task
-            }));
-        } catch {
-            emitMascotEvents(['error']);
-            setTranslation((current) => current.task.id === 'starting'
-                ? translationBubbleReducer(current, {
-                    type: 'failed',
-                    taskId: 'starting',
-                    error: {
-                        code: 'request-failed',
-                        message: 'Selection translation failed.'
-                    }
-                })
-                : current);
+            await operation();
+        } finally {
+            translationBusyRef.current = false;
+            setTranslationBusy(false);
         }
-    }, [emitMascotEvents]);
+    }, []);
+    const startTranslation = useCallback(async (): Promise<void> => {
+        await runTranslationExclusive(async () => {
+            emitMascotEvents(['listening', 'thinking']);
+            setTranslation({
+                task: {
+                    id: 'starting',
+                    status: 'running',
+                    sourceText: 'Capturing selected text',
+                    translatedText: '',
+                    targetLanguage: 'und'
+                },
+                streamDelta: ''
+            });
+            try {
+                const task = await window.desktopPet.translateSelection();
+                emitMascotEvents(['success']);
+                setTranslation((current) => translationBubbleReducer(current, {
+                    type: 'completed',
+                    task
+                }));
+            } catch (caught) {
+                emitMascotEvents(['error']);
+                setTranslation((current) => current.task.id === 'starting'
+                    ? translationBubbleReducer(current, {
+                        type: 'failed',
+                        taskId: 'starting',
+                        error: toTranslationError(caught, 'Selection translation failed.')
+                    })
+                    : current);
+            }
+        });
+    }, [emitMascotEvents, runTranslationExclusive]);
 
     const startScreenshotTranslation = useCallback(async (
         bounds: ScreenBounds
     ): Promise<void> => {
-        setScreenshotBounds(bounds);
-        emitMascotEvents(['listening', 'thinking']);
-        setTranslation({
-            task: {
-                id: 'screenshot-starting',
-                status: 'running',
-                sourceText: 'Screenshot region',
-                translatedText: '',
-                targetLanguage: 'und'
-            },
-            streamDelta: ''
+        await runTranslationExclusive(async () => {
+            emitMascotEvents(['listening', 'thinking']);
+            setTranslation({
+                task: {
+                    id: 'screenshot-starting',
+                    status: 'running',
+                    sourceText: 'Screenshot region',
+                    translatedText: '',
+                    targetLanguage: 'und'
+                },
+                streamDelta: ''
+            });
+            try {
+                const task = await window.desktopPet.translateScreenshot(bounds);
+                screenshotBoundsByTaskId.current.set(task.id, bounds);
+                emitMascotEvents(['success']);
+                setTranslation((current) => translationBubbleReducer(current, {
+                    type: 'completed',
+                    task
+                }));
+            } catch (caught) {
+                emitMascotEvents(['error']);
+                setTranslation((current) => current.task.status === 'running'
+                    ? translationBubbleReducer(current, {
+                        type: 'failed',
+                        taskId: current.task.id,
+                        error: toTranslationError(caught, 'Screenshot translation failed.')
+                    })
+                    : current);
+            }
         });
-        try {
-            const task = await window.desktopPet.translateScreenshot(bounds);
-            emitMascotEvents(['success']);
-            setTranslation((current) => translationBubbleReducer(current, {
-                type: 'completed',
-                task
-            }));
-        } catch {
-            emitMascotEvents(['error']);
-            setTranslation((current) => current.task.status === 'running'
-                ? translationBubbleReducer(current, {
-                    type: 'failed',
-                    taskId: current.task.id,
-                    error: {
-                        code: 'request-failed',
-                        message: 'Screenshot translation failed.'
-                    }
-                })
-                : current);
-        }
-    }, [emitMascotEvents]);
+    }, [emitMascotEvents, runTranslationExclusive]);
+
+    const retryTranslation = useCallback(async (task: TranslationTask): Promise<void> => {
+        await runTranslationExclusive(async () => {
+            emitMascotEvents(['listening', 'thinking']);
+            setTranslation({
+                task: {
+                    ...task,
+                    id: `${task.id}-retry`,
+                    status: 'running',
+                    translatedText: '',
+                    error: undefined,
+                    errorCode: undefined
+                },
+                streamDelta: ''
+            });
+            try {
+                const bounds = screenshotBoundsByTaskId.current.get(task.id);
+                const retried = bounds === undefined
+                    ? await window.desktopPet.retryTranslation({
+                        kind: 'selection',
+                        sourceText: task.sourceText
+                    })
+                    : await window.desktopPet.retryTranslation({
+                        kind: 'screenshot',
+                        bounds
+                    });
+                if (bounds !== undefined)
+                    screenshotBoundsByTaskId.current.set(retried.id, bounds);
+                emitMascotEvents(['success']);
+                setTranslation((current) => translationBubbleReducer(current, {
+                    type: 'completed',
+                    task: retried
+                }));
+            } catch (caught) {
+                emitMascotEvents(['error']);
+                setTranslation((current) => current.task.status === 'running'
+                    ? translationBubbleReducer(current, {
+                        type: 'failed',
+                        taskId: current.task.id,
+                        error: toTranslationError(caught, 'Translation retry failed.')
+                    })
+                    : current);
+            }
+        });
+    }, [emitMascotEvents, runTranslationExclusive]);
 
     const openScreenshotSelection = useCallback((): void => {
         void window.desktopPet.openScreenshotSelection().catch(() => undefined);
@@ -206,31 +278,21 @@ function PetApp(): React.JSX.Element {
         <PetWindow eventBatch={mascotEvents} eventBatchId={mascotBatchId}>
             <main>
                 <h1>Desktop Pet Translator</h1>
-                <button type="button" onClick={() => void startTranslation()}>
+                <button type="button" disabled={translationBusy} onClick={() => void startTranslation()}>
                     Translate selection
                 </button>
-                <button type="button" onClick={openScreenshotSelection}>
+                <button type="button" disabled={translationBusy} onClick={openScreenshotSelection}>
                     Translate screenshot
                 </button>
                 <button type="button" onClick={openSettings}>Settings</button>
                 <TranslationBubble
                     task={translation.task}
                     streamDelta={translation.streamDelta}
-                    pinned={pinned}
-                    onCopy={() => void window.desktopPet.copyTranslation(
-                        translation.streamDelta || translation.task.translatedText
-                    )}
-                    onSpeak={() => window.desktopPet.speakTranslation(
-                        translation.streamDelta || translation.task.translatedText
-                    )}
-                    onTogglePin={() => setPinned((current) => !current)}
-                    onRetry={() => {
-                        if (screenshotBounds !== undefined)
-                            void startScreenshotTranslation(screenshotBounds);
-                        else
-                            void startTranslation();
-                    }}
-                    onCancel={() => void window.desktopPet.cancelTranslation(translation.task.id)}
+                    busy={translationBusy}
+                    onCopy={(text) => void window.desktopPet.copyTranslation(text)}
+                    onSpeak={(text) => window.desktopPet.speakTranslation(text)}
+                    onRetry={retryTranslation}
+                    onCancel={(taskId) => void window.desktopPet.cancelTranslation(taskId)}
                 />
             </main>
         </PetWindow>

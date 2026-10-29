@@ -5,6 +5,7 @@ import {
     MAX_CONTEXT_CHARS,
     MAX_SOURCE_TEXT_CHARS,
     MAX_TARGET_LANGUAGE_CHARS,
+    detectSourceLanguage,
     type ProviderConfig,
     type SelectionCapture,
     type SelectionErrorCode,
@@ -43,6 +44,7 @@ export interface SelectionServiceOptions {
 export interface SelectionTranslationOptions {
     taskId?: string;
     signal?: AbortSignal;
+    sourceText?: string;
     targetLanguage?: string;
     context?: string;
     onTaskId?: (taskId: string) => void;
@@ -161,9 +163,11 @@ export class SelectionService {
         const taskId = options.taskId ?? this.createId();
         options.onTaskId?.(taskId);
 
-        let capture: SelectionCapture;
+        let sourceText: string;
         try {
-            capture = await this.captureSelectionOnce(options.signal);
+            sourceText = options.sourceText === undefined
+                ? (await this.captureSelectionOnce(options.signal)).sourceText
+                : normalizeSelection(options.sourceText);
         } catch (error) {
             if (error instanceof SelectionError && error.code !== 'aborted')
                 throw error;
@@ -171,8 +175,9 @@ export class SelectionService {
         }
 
         let targetLanguage = 'und';
+        let provider: ProviderConfig | undefined;
         try {
-            const provider = await this.getProvider();
+            provider = await this.getProvider();
             const requestedLanguage = options.targetLanguage
                 ?? provider.targetLanguage
                 ?? '';
@@ -190,7 +195,7 @@ export class SelectionService {
                     ...provider,
                     streaming: true
                 },
-                sourceText: capture.sourceText,
+                sourceText,
                 context: options.context,
                 targetLanguage
             };
@@ -202,17 +207,30 @@ export class SelectionService {
             return {
                 id: taskId,
                 status: 'completed',
-                sourceText: capture.sourceText,
+                sourceText,
                 translatedText: result.translatedText,
-                targetLanguage
+                sourceLanguage: detectSourceLanguage(sourceText),
+                targetLanguage,
+                ...(provider.id === undefined ? {} : { providerId: provider.id }),
+                providerName: provider.name,
+                textModel: provider.textModel,
+                visionModel: provider.visionModel,
+                translationModel: result.model
             };
         } catch (error) {
             return {
                 id: taskId,
                 status: 'failed',
-                sourceText: capture.sourceText,
+                sourceText,
                 translatedText: '',
+                sourceLanguage: detectSourceLanguage(sourceText),
                 targetLanguage,
+                ...(provider?.id === undefined ? {} : { providerId: provider.id }),
+                ...(provider === undefined ? {} : {
+                    providerName: provider.name,
+                    textModel: provider.textModel,
+                    visionModel: provider.visionModel
+                }),
                 error: safeTaskError(error),
                 errorCode: safeTaskErrorCode(error)
             };

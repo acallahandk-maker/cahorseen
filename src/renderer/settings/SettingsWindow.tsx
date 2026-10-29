@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+    isValidHotkey,
     settingsPreferencesSchema,
     type ConnectionTestResult,
     type ProviderDetails,
@@ -26,6 +27,7 @@ export interface SettingsWindowProps {
         capability: 'text' | 'vision'
     ) => Promise<ConnectionTestResult> | ConnectionTestResult | void;
     onSavePreferences?: (preferences: SettingsPreferences) => Promise<unknown> | void;
+    onLoadProviderDetails?: (providerId: string) => Promise<ProviderDetails>;
 }
 
 interface SettingsDesktopPetApi {
@@ -40,12 +42,6 @@ interface SettingsDesktopPetApi {
         capability: 'text' | 'vision'
     ) => Promise<ConnectionTestResult>;
     saveSettings: (preferences: SettingsPreferences) => Promise<unknown>;
-}
-
-function getDesktopPetApi(): SettingsDesktopPetApi | undefined {
-    return typeof window === 'undefined'
-        ? undefined
-        : (window as unknown as { desktopPet?: SettingsDesktopPetApi }).desktopPet;
 }
 
 export interface HotkeyEventLike {
@@ -76,14 +72,18 @@ const defaultPreferences: SettingsPreferences = settingsPreferencesSchema.parse(
     }
 });
 
+function getDesktopPetApi(): SettingsDesktopPetApi | undefined {
+    return typeof window === 'undefined'
+        ? undefined
+        : (window as unknown as { desktopPet?: SettingsDesktopPetApi }).desktopPet;
+}
+
 export function maskSecret(secret: string): string {
     return secret.length === 0 ? 'Not set' : '••••••••';
 }
 
 function normalizeKey(value: string): string {
-    if (value.length === 1)
-        return value.toUpperCase();
-    return value;
+    return value.length === 1 ? value.toUpperCase() : value;
 }
 
 export function hotkeyFromEvent(event: HotkeyEventLike): string {
@@ -98,20 +98,11 @@ export function hotkeyFromEvent(event: HotkeyEventLike): string {
 
 export function validateHotkey(value: string | HotkeyEventLike): HotkeyValidation {
     const hotkey = typeof value === 'string' ? value : hotkeyFromEvent(value);
-    const parts = hotkey.split('+').map((part) => part.trim()).filter(Boolean);
-    const modifiers = new Set(parts.slice(0, -1));
-    const key = parts.at(-1);
-    const validModifiers = ['Alt', 'Ctrl', 'Meta', 'Shift'];
-    const valid = parts.length >= 2
-        && key !== undefined
-        && !validModifiers.includes(key)
-        && parts.slice(0, -1).every((part) => validModifiers.includes(part))
-        && modifiers.size === parts.length - 1;
-    return valid
-        ? { valid: true, value: parts.join('+') }
+    return isValidHotkey(hotkey)
+        ? { valid: true, value: hotkey.split('+').map((part) => part.trim()).join('+') }
         : {
             valid: false,
-            error: 'Use one or more modifiers plus exactly one key.'
+            error: 'Use one or more modifiers plus exactly one non-modifier key.'
         };
 }
 
@@ -122,10 +113,10 @@ interface ProviderForm {
     apiKey: string;
     textModel: string;
     visionModel: string;
-    systemPrompt: string;
-    targetLanguage: string;
-    timeoutMs: string;
-    streaming: boolean;
+    systemPrompt?: string;
+    targetLanguage?: string;
+    timeoutMs?: string;
+    streaming?: boolean;
 }
 
 function emptyProviderForm(): ProviderForm {
@@ -135,22 +126,7 @@ function emptyProviderForm(): ProviderForm {
         apiKey: '',
         textModel: '',
         visionModel: '',
-        systemPrompt: '',
-        targetLanguage: 'en',
-        timeoutMs: '30000',
-        streaming: true
-    };
-}
-
-function providerToForm(provider: ProviderSummary): ProviderForm {
-    return {
-        id: provider.id,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        apiKey: '',
-        textModel: provider.textModel,
-        visionModel: provider.visionModel,
-        systemPrompt: '',
+        systemPrompt: undefined,
         targetLanguage: 'en',
         timeoutMs: '30000',
         streaming: true
@@ -163,16 +139,21 @@ function applyProviderDetails(form: ProviderForm, details: ProviderDetails): Pro
         id: details.id,
         name: details.name,
         baseUrl: details.baseUrl,
+        apiKey: '',
         textModel: details.textModel,
         visionModel: details.visionModel,
-        systemPrompt: details.systemPrompt ?? '',
-        targetLanguage: details.targetLanguage ?? 'en',
-        timeoutMs: String(details.timeoutMs ?? 30_000),
-        streaming: details.streaming ?? true
+        systemPrompt: details.systemPrompt,
+        targetLanguage: details.targetLanguage,
+        timeoutMs: details.timeoutMs === undefined ? undefined : String(details.timeoutMs),
+        streaming: details.streaming
     };
 }
 
 function toProviderSaveConfig(form: ProviderForm): ProviderSaveConfig {
+    const timeoutValue = form.timeoutMs?.trim();
+    const timeoutMs = timeoutValue === undefined || timeoutValue.length === 0
+        ? undefined
+        : Number(timeoutValue);
     return {
         ...(form.id === undefined ? {} : { id: form.id }),
         name: form.name.trim(),
@@ -180,10 +161,16 @@ function toProviderSaveConfig(form: ProviderForm): ProviderSaveConfig {
         ...(form.apiKey.length === 0 ? {} : { apiKey: form.apiKey }),
         textModel: form.textModel.trim(),
         visionModel: form.visionModel.trim(),
-        ...(form.systemPrompt.length === 0 ? {} : { systemPrompt: form.systemPrompt }),
-        targetLanguage: form.targetLanguage.trim(),
-        timeoutMs: Number(form.timeoutMs),
-        streaming: form.streaming
+        ...(form.systemPrompt === undefined
+            ? {}
+            : { systemPrompt: form.systemPrompt.trim() }),
+        ...(form.targetLanguage === undefined || form.targetLanguage.trim().length === 0
+            ? {}
+            : { targetLanguage: form.targetLanguage.trim() }),
+        ...(timeoutMs !== undefined && Number.isInteger(timeoutMs) && timeoutMs > 0
+            ? { timeoutMs }
+            : {}),
+        ...(form.streaming === undefined ? {} : { streaming: form.streaming })
     };
 }
 
@@ -196,24 +183,30 @@ export default function SettingsWindow({
     onDeleteProvider,
     onSelectProvider,
     onTestProvider,
-    onSavePreferences
+    onSavePreferences,
+    onLoadProviderDetails
 }: SettingsWindowProps): React.JSX.Element {
+    const desktopPet = getDesktopPetApi();
     const [providers, setProviders] = useState<ProviderSummary[]>(providedProviders ?? []);
     const [activeProviderId, setActiveProviderId] = useState(
-        providedActiveProviderId ?? providedProviders?.[0]?.id ?? ''
+        providedActiveProviderId ?? ''
     );
     const [preferences, setPreferences] = useState<SettingsPreferences>(
         providedPreferences ?? defaultPreferences
     );
-    const [form, setForm] = useState<ProviderForm>(
-        providedProviders?.find((provider) => provider.id === activeProviderId)
-            ? providerToForm(providers.find((provider) => provider.id === activeProviderId)!)
-            : emptyProviderForm()
+    const [form, setForm] = useState<ProviderForm>();
+    const [loadedProviderId, setLoadedProviderId] = useState('');
+    const [loading, setLoading] = useState(
+        providedProviders === undefined || providedPreferences === undefined
     );
+    const [detailsLoading, setDetailsLoading] = useState(false);
+    const [selectionPending, setSelectionPending] = useState(false);
     const [error, setError] = useState<SettingsError | undefined>(providedError);
     const [testResult, setTestResult] = useState<ConnectionTestResult>();
     const [hotkeyDraft, setHotkeyDraft] = useState(preferences.hotkey);
-    const desktopPet = getDesktopPetApi();
+    const detailGeneration = useRef(0);
+    const selectionGeneration = useRef(0);
+    const initialDetailsRequested = useRef(false);
 
     useEffect(() => {
         if (providedProviders !== undefined)
@@ -221,72 +214,151 @@ export default function SettingsWindow({
     }, [providedProviders]);
 
     useEffect(() => {
+        if (providedPreferences !== undefined) {
+            setPreferences(providedPreferences);
+            setHotkeyDraft(providedPreferences.hotkey);
+        }
+    }, [providedPreferences]);
+
+    useEffect(() => {
         if (providedError !== undefined)
             setError(providedError);
     }, [providedError]);
 
-    useEffect(() => {
-        if (providedProviders !== undefined || desktopPet === undefined)
-            return;
-        void desktopPet.getProviderSummaries()
-            .then((summaries) => {
-                setProviders(summaries);
-                const nextActive = summaries[0]?.id ?? '';
-                setActiveProviderId(nextActive);
-                setForm(summaries[0] === undefined
-                    ? emptyProviderForm()
-                    : providerToForm(summaries[0]));
-            })
-            .catch((caught: unknown) => setError(toSettingsError(caught)));
-    }, [desktopPet, providedProviders]);
-
-    useEffect(() => {
-        if (providedPreferences !== undefined || desktopPet === undefined)
-            return;
-        void desktopPet.getSettings()
-            .then((settings) => {
-                setPreferences(settings.preferences);
-                setHotkeyDraft(settings.preferences.hotkey);
-                if (settings.activeProviderId !== undefined)
-                    setActiveProviderId(settings.activeProviderId);
-            })
-            .catch((caught: unknown) => setError(toSettingsError(caught)));
-    }, [desktopPet, providedPreferences]);
+    const loadProviderDetails = async (
+        providerId: string,
+        generation: number
+    ): Promise<void> => {
+        const loader = onLoadProviderDetails ?? desktopPet?.getProviderDetails;
+        if (loader === undefined)
+            throw new Error('Provider details are unavailable.');
+        setDetailsLoading(true);
+        try {
+            const details = await loader(providerId);
+            if (detailGeneration.current !== generation)
+                return;
+            setForm((current) => applyProviderDetails(current ?? emptyProviderForm(), details));
+            setLoadedProviderId(providerId);
+        } finally {
+            if (detailGeneration.current === generation)
+                setDetailsLoading(false);
+        }
+    };
 
     useEffect(() => {
         if (providedProviders !== undefined
-            || desktopPet === undefined
-            || activeProviderId.length === 0)
+            || providedPreferences !== undefined
+            || desktopPet === undefined)
             return;
-        void desktopPet.getProviderDetails(activeProviderId)
-            .then((details) => {
-                setForm((current) => applyProviderDetails(current, details));
-            })
-            .catch((caught: unknown) => setError(toSettingsError(caught)));
-    }, [activeProviderId, desktopPet, providedProviders]);
+        const generation = ++selectionGeneration.current;
+        void Promise.all([
+            desktopPet.getProviderSummaries(),
+            desktopPet.getSettings()
+        ]).then(([summaries, settings]) => {
+            if (selectionGeneration.current !== generation)
+                return;
+            const nextActive = settings.activeProviderId ?? summaries[0]?.id ?? '';
+            setProviders(summaries);
+            setPreferences(settings.preferences);
+            setHotkeyDraft(settings.preferences.hotkey);
+            setActiveProviderId(nextActive);
+            setLoading(false);
+            if (nextActive.length > 0) {
+                const detailsGeneration = ++detailGeneration.current;
+                void loadProviderDetails(nextActive, detailsGeneration).catch((caught: unknown) => {
+                    if (detailGeneration.current === detailsGeneration)
+                        setError(toSettingsError(caught));
+                });
+            }
+        }).catch((caught: unknown) => {
+            if (selectionGeneration.current === generation) {
+                setLoading(false);
+                setError(toSettingsError(caught));
+            }
+        });
+    }, [desktopPet, providedPreferences, providedProviders]);
 
-    const selectedProvider = useMemo(
-        () => providers.find((provider) => provider.id === activeProviderId),
-        [activeProviderId, providers]
-    );
+    useEffect(() => {
+        if (initialDetailsRequested.current
+            || loading
+            || activeProviderId.length === 0
+            || providedProviders === undefined)
+            return;
+        initialDetailsRequested.current = true;
+        const generation = ++detailGeneration.current;
+        void loadProviderDetails(activeProviderId, generation).catch((caught: unknown) => {
+            if (detailGeneration.current === generation)
+                setError(toSettingsError(caught));
+        });
+    }, [activeProviderId, loading, providedProviders]);
+
+    const providerActionsDisabled = loading
+        || selectionPending
+        || detailsLoading
+        || (activeProviderId.length > 0 && loadedProviderId !== activeProviderId);
+    const deleteDisabled = providerActionsDisabled || activeProviderId.length === 0;
 
     const updateForm = (patch: Partial<ProviderForm>): void => {
-        setForm((current) => ({ ...current, ...patch }));
+        setForm((current) => ({ ...(current ?? emptyProviderForm()), ...patch }));
+    };
+
+    const startProviderCreation = (): void => {
+        ++detailGeneration.current;
+        ++selectionGeneration.current;
+        setActiveProviderId('');
+        setLoadedProviderId('new-provider');
+        setForm(emptyProviderForm());
+        setDetailsLoading(false);
+        setSelectionPending(false);
+        setError(undefined);
+    };
+
+    const selectProvider = async (providerId: string): Promise<void> => {
+        const previous = {
+            activeProviderId,
+            form,
+            loadedProviderId
+        };
+        const selectionId = ++selectionGeneration.current;
+        const generation = ++detailGeneration.current;
+        setActiveProviderId(providerId);
+        setLoadedProviderId('');
+        setForm(undefined);
+        setSelectionPending(true);
+        setError(undefined);
+        try {
+            await (onSelectProvider ?? desktopPet?.setActiveProvider)?.(providerId);
+            await loadProviderDetails(providerId, generation);
+        } catch (caught) {
+            if (selectionGeneration.current !== selectionId)
+                return;
+            detailGeneration.current += 1;
+            selectionGeneration.current += 1;
+            setSelectionPending(false);
+            setActiveProviderId(previous.activeProviderId);
+            setForm(previous.form);
+            setLoadedProviderId(previous.loadedProviderId);
+            setError(toSettingsError(caught));
+        } finally {
+            if (selectionGeneration.current === selectionId)
+                setSelectionPending(false);
+        }
     };
 
     const saveProvider = async (): Promise<void> => {
+        if (form === undefined || providerActionsDisabled)
+            return;
         try {
             const config = toProviderSaveConfig(form);
-            const save = onSaveProvider ?? desktopPet?.saveProvider;
-            const saved = await save?.(config);
-            if (saved !== undefined) {
-                setProviders((current) => {
-                    const next = current.filter((provider) => provider.id !== saved.id);
-                    return [...next, saved].sort((left, right) => left.name.localeCompare(right.name));
-                });
-                setActiveProviderId(saved.id);
-                setForm(providerToForm(saved));
-            }
+            const saved = await (onSaveProvider ?? desktopPet?.saveProvider)?.(config);
+            const resolvedId = saved?.id ?? form.id ?? '';
+            setProviders((current) => saved === undefined
+                ? current
+                : [...current.filter((provider) => provider.id !== saved.id), saved]
+                    .sort((left, right) => left.name.localeCompare(right.name)));
+            setForm({ ...form, id: resolvedId, apiKey: '' });
+            setLoadedProviderId(resolvedId);
+            setActiveProviderId(resolvedId);
             setError(undefined);
         } catch (caught) {
             setError(toSettingsError(caught));
@@ -294,7 +366,7 @@ export default function SettingsWindow({
     };
 
     const deleteProvider = async (): Promise<void> => {
-        if (activeProviderId.length === 0)
+        if (deleteDisabled)
             return;
         try {
             await (onDeleteProvider ?? desktopPet?.deleteProvider)?.(activeProviderId);
@@ -302,15 +374,22 @@ export default function SettingsWindow({
             setProviders(next);
             const nextActive = next[0]?.id ?? '';
             setActiveProviderId(nextActive);
-            setForm(next[0] === undefined ? emptyProviderForm() : providerToForm(next[0]));
+            setLoadedProviderId('');
+            setForm(undefined);
             setError(undefined);
+            if (nextActive.length > 0) {
+                const generation = ++detailGeneration.current;
+                void loadProviderDetails(nextActive, generation).catch(
+                    (caught: unknown) => setError(toSettingsError(caught))
+                );
+            }
         } catch (caught) {
             setError(toSettingsError(caught));
         }
     };
 
     const testProvider = async (capability: 'text' | 'vision'): Promise<void> => {
-        if (activeProviderId.length === 0)
+        if (providerActionsDisabled)
             return;
         try {
             const result = await (onTestProvider ?? desktopPet?.testProvider)?.(
@@ -328,15 +407,17 @@ export default function SettingsWindow({
     const savePreferences = async (): Promise<void> => {
         const validation = validateHotkey(hotkeyDraft);
         if (!validation.valid) {
-            setError({ code: 'invalid-request', message: validation.error ?? 'Hotkey is invalid.' });
+            setError({
+                code: 'invalid-request',
+                message: validation.error ?? 'Hotkey is invalid.'
+            });
             return;
         }
-        const next = {
-            ...preferences,
-            hotkey: validation.value ?? hotkeyDraft
-        };
         try {
-            const parsed = settingsPreferencesSchema.parse(next);
+            const parsed = settingsPreferencesSchema.parse({
+                ...preferences,
+                hotkey: validation.value ?? hotkeyDraft
+            });
             await (onSavePreferences ?? desktopPet?.saveSettings)?.(parsed);
             setPreferences(parsed);
             setError(undefined);
@@ -358,13 +439,8 @@ export default function SettingsWindow({
                     <select
                         aria-label="Active provider"
                         value={activeProviderId}
-                        onChange={(event) => {
-                            const providerId = event.target.value;
-                            setActiveProviderId(providerId);
-                            const provider = providers.find((item) => item.id === providerId);
-                            setForm(provider === undefined ? emptyProviderForm() : providerToForm(provider));
-                            void (onSelectProvider ?? desktopPet?.setActiveProvider)?.(providerId);
-                        }}
+                        disabled={loading || selectionPending}
+                        onChange={(event) => void selectProvider(event.target.value)}
                     >
                         <option value="">Select provider</option>
                         {providers.map((provider) => (
@@ -373,58 +449,104 @@ export default function SettingsWindow({
                     </select>
                 </label>
                 <div>
-                    <button type="button" onClick={() => {
-                        setActiveProviderId('');
-                        setForm(emptyProviderForm());
-                    }}>Add provider</button>
-                    <button type="button" onClick={() => void deleteProvider()}>Delete provider</button>
-                    <button type="button" onClick={() => void testProvider('text')}>Test text connection</button>
-                    <button type="button" onClick={() => void testProvider('vision')}>Test vision connection</button>
+                    <button type="button" disabled={loading} onClick={startProviderCreation}>
+                        Add provider
+                    </button>
+                    <button type="button" disabled={deleteDisabled} onClick={() => void deleteProvider()}>
+                        Delete provider
+                    </button>
+                    <button type="button" disabled={providerActionsDisabled} onClick={() => void testProvider('text')}>
+                        Test text connection
+                    </button>
+                    <button type="button" disabled={providerActionsDisabled} onClick={() => void testProvider('vision')}>
+                        Test vision connection
+                    </button>
                 </div>
                 <label>
                     Name
-                    <input value={form.name} onChange={(event) => updateForm({ name: event.target.value })} />
+                    <input
+                        value={form?.name ?? ''}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ name: event.target.value })}
+                    />
                 </label>
                 <label>
                     HTTPS Base URL
-                    <input value={form.baseUrl} onChange={(event) => updateForm({ baseUrl: event.target.value })} />
+                    <input
+                        value={form?.baseUrl ?? ''}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ baseUrl: event.target.value })}
+                    />
                 </label>
                 <label>
                     API key
                     <input
                         type="password"
-                        aria-label="API key write-only replacement"
+                        aria-label="API key"
                         placeholder="Write-only replacement"
-                        value={form.apiKey}
+                        value={form?.apiKey ?? ''}
+                        disabled={form === undefined}
                         onChange={(event) => updateForm({ apiKey: event.target.value })}
                     />
-                    <small>{selectedProvider?.hasApiKey === true ? maskSecret('stored') : maskSecret('')}</small>
+                    <small>{activeProviderId.length === 0 ? maskSecret('') : maskSecret('stored')}</small>
                 </label>
                 <label>
                     Text model
-                    <input value={form.textModel} onChange={(event) => updateForm({ textModel: event.target.value })} />
+                    <input
+                        value={form?.textModel ?? ''}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ textModel: event.target.value })}
+                    />
                 </label>
                 <label>
                     Vision model
-                    <input value={form.visionModel} onChange={(event) => updateForm({ visionModel: event.target.value })} />
+                    <input
+                        value={form?.visionModel ?? ''}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ visionModel: event.target.value })}
+                    />
                 </label>
                 <label>
                     System prompt
-                    <textarea value={form.systemPrompt} onChange={(event) => updateForm({ systemPrompt: event.target.value })} />
+                    <textarea
+                        value={form?.systemPrompt ?? ''}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ systemPrompt: event.target.value })}
+                    />
                 </label>
                 <label>
                     Target language
-                    <input value={form.targetLanguage} onChange={(event) => updateForm({ targetLanguage: event.target.value })} />
+                    <input
+                        value={form?.targetLanguage ?? ''}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ targetLanguage: event.target.value })}
+                    />
                 </label>
                 <label>
                     Timeout (ms)
-                    <input type="number" value={form.timeoutMs} onChange={(event) => updateForm({ timeoutMs: event.target.value })} />
+                    <input
+                        type="number"
+                        value={form?.timeoutMs ?? ''}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ timeoutMs: event.target.value })}
+                    />
                 </label>
                 <label>
-                    <input type="checkbox" checked={form.streaming} onChange={(event) => updateForm({ streaming: event.target.checked })} />
+                    <input
+                        type="checkbox"
+                        checked={form?.streaming ?? false}
+                        disabled={form === undefined}
+                        onChange={(event) => updateForm({ streaming: event.target.checked })}
+                    />
                     Streaming
                 </label>
-                <button type="button" onClick={() => void saveProvider()}>Save provider</button>
+                <button
+                    type="button"
+                    disabled={form === undefined || providerActionsDisabled}
+                    onClick={() => void saveProvider()}
+                >
+                    Save provider
+                </button>
                 {testResult === undefined ? null : (
                     <p role="status" data-test-capability={testResult.capability}>{testResult.message}</p>
                 )}
@@ -439,7 +561,15 @@ export default function SettingsWindow({
                         onChange={(event) => setHotkeyDraft(event.target.value)}
                         onKeyDown={(event) => {
                             event.preventDefault();
-                            setHotkeyDraft(hotkeyFromEvent(event));
+                            const captured = hotkeyFromEvent(event);
+                            const validation = validateHotkey(captured);
+                            setHotkeyDraft(captured);
+                            if (!validation.valid) {
+                                setError({
+                                    code: 'invalid-request',
+                                    message: validation.error ?? 'Hotkey is invalid.'
+                                });
+                            }
                         }}
                     />
                 </label>
@@ -473,7 +603,9 @@ export default function SettingsWindow({
                     ...preferences,
                     performance: { ...preferences.performance, limitFrameRate: event.target.checked }
                 })} /> Limit frame rate</label>
-                <button type="button" onClick={() => void savePreferences()}>Save preferences</button>
+                <button type="button" disabled={loading} onClick={() => void savePreferences()}>
+                    Save preferences
+                </button>
             </section>
         </main>
     );

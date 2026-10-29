@@ -166,7 +166,12 @@ describe('selectionService', () => {
             status: 'failed',
             sourceText: 'selected text',
             translatedText: '',
+            sourceLanguage: 'en',
             targetLanguage: 'zh-CN',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic Provider',
+            textModel: 'synthetic-text-model',
+            visionModel: 'synthetic-vision-model',
             error: 'Provider request failed.',
             errorCode: 'request-failed'
         });
@@ -194,7 +199,12 @@ describe('selectionService', () => {
             status: 'failed',
             sourceText: 'selected text',
             translatedText: '',
+            sourceLanguage: 'en',
             targetLanguage: 'und',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic Provider',
+            textModel: 'synthetic-text-model',
+            visionModel: 'synthetic-vision-model',
             error: 'Provider configuration is invalid.',
             errorCode: 'invalid-config'
         });
@@ -264,5 +274,33 @@ describe('selectionService', () => {
         );
         expect(result.sourceText).toBe('selected text');
         expect(result.status).toBe('completed');
+        expect(result).toMatchObject({
+            sourceLanguage: 'en',
+            targetLanguage: 'zh-CN',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic Provider',
+            textModel: 'synthetic-text-model',
+            visionModel: 'synthetic-vision-model',
+            translationModel: 'synthetic-text-model'
+        });
+    });
+
+    it('reuses retry source text without recapturing selection', async () => {
+        const captureAdapter = adapter();
+        const translationRunner = runner();
+
+        const result = await service(captureAdapter, translationRunner).translateSelection({
+            sourceText: 'exact retry source'
+        });
+
+        expect(result.sourceText).toBe('exact retry source');
+        expect(captureAdapter.readAccessibilitySelection).not.toHaveBeenCalled();
+        expect(captureAdapter.copySelectionToClipboard).not.toHaveBeenCalled();
+        expect(captureAdapter.readClipboardText).not.toHaveBeenCalled();
+        expect(translationRunner.run).toHaveBeenCalledWith(
+            expect.objectContaining({ sourceText: 'exact retry source' }),
+            undefined,
+            undefined
+        );
     });
 });
