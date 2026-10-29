@@ -8,6 +8,7 @@ import {
     capturedImageSchema,
     screenBoundsSchema,
     type CapturedImage,
+    type MemoryPersistenceStatus,
     type ProviderConfig,
     type ScreenBounds,
     type TranslationErrorCode,
@@ -24,6 +25,11 @@ import {
     type ImageTranslationRunnerRequest
 } from '../workers/translationWorker';
 import { getActiveProviderConfig } from './secureConfig';
+import {
+    memoryFailureStatus,
+    memoryRecordedStatus,
+    recordTranslation as recordTranslationMemory
+} from './memoryDatabase';
 
 export type { ImageTranslationRunner };
 export { UnsupportedVisionError };
@@ -65,6 +71,8 @@ export interface ScreenshotServiceOptions {
     maxDimension?: number;
     maxSourceBytes?: number;
     createId?: () => string;
+    recordTranslation?: (task: TranslationTask) => Promise<void>;
+    onMemoryStatus?: (status: MemoryPersistenceStatus) => void;
 }
 
 export interface ScreenshotTranslationOptions {
@@ -309,6 +317,8 @@ export class ScreenshotService {
     private readonly maxDimension: number;
     private readonly maxSourceBytes: number;
     private readonly createId: () => string;
+    private readonly recordTranslation: ((task: TranslationTask) => Promise<void>) | undefined;
+    private readonly onMemoryStatus: ((status: MemoryPersistenceStatus) => void) | undefined;
     private readonly captures = new Set<CapturedImage>();
     private captureQueue: Promise<void> = Promise.resolve();
 
@@ -331,6 +341,8 @@ export class ScreenshotService {
         this.maxDimension = maxDimension;
         this.maxSourceBytes = maxSourceBytes;
         this.createId = options.createId ?? randomUUID;
+        this.recordTranslation = options.recordTranslation;
+        this.onMemoryStatus = options.onMemoryStatus;
     }
 
     activeCaptureCount(): number {
@@ -489,7 +501,7 @@ export class ScreenshotService {
                 targetLanguage
             };
             const result = await this.translationRunner.runImage(request, options.signal);
-            return {
+            return this.persistCompletedTask({
                 id: taskId,
                 status: 'completed',
                 kind: 'screenshot',
@@ -508,7 +520,7 @@ export class ScreenshotService {
                 textModel: provider.textModel,
                 visionModel: provider.visionModel,
                 translationModel: result.model
-            };
+            });
         } catch (error) {
             return {
                 id: taskId,
@@ -536,6 +548,28 @@ export class ScreenshotService {
         } finally {
             if (image !== undefined)
                 this.disposeCapturedImage(image);
+        }
+    }
+
+    private async persistCompletedTask(task: TranslationTask): Promise<TranslationTask> {
+        if (this.recordTranslation === undefined)
+            return task;
+        try {
+            await this.recordTranslation(task);
+            this.notifyMemoryStatus(memoryRecordedStatus());
+            return task;
+        } catch (error) {
+            const status = memoryFailureStatus(error);
+            this.notifyMemoryStatus(status);
+            return { ...task, memoryStatus: status };
+        }
+    }
+
+    private notifyMemoryStatus(status: MemoryPersistenceStatus): void {
+        try {
+            this.onMemoryStatus?.(status);
+        } catch {
+            return;
         }
     }
 }
@@ -628,7 +662,8 @@ async function getDefaultService(): Promise<ScreenshotService> {
             getDisplays: () => screen.getAllDisplays().map((display) => display.bounds),
             mapBoundsToCapturePixels: (_displayIndex, bounds) => (
                 screen.dipToScreenRect(null, bounds)
-            )
+            ),
+            recordTranslation: recordTranslationMemory
         });
     }
     return defaultService;

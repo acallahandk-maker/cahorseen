@@ -16,6 +16,7 @@ import {
     providerConfigSchema,
     translationErrorCodeSchema,
     type ProviderErrorCode,
+    type MemoryPersistenceStatus,
     type ScreenBounds,
     type TranslationTask
 } from '../../shared/contracts';
@@ -29,6 +30,10 @@ import {
     type TranslationDeltaHandler,
     type TranslationResult
 } from '../services/openAiClient';
+import {
+    memoryFailureStatus,
+    memoryRecordedStatus
+} from '../services/memoryDatabase';
 
 export { UnsupportedVisionError };
 
@@ -62,6 +67,7 @@ export interface TranslationWorkerRunnerOptions {
     workerPath: string;
     workerFactory?: (filename: string, options: WorkerOptions) => Worker;
     onTaskCompleted?: (task: TranslationTask) => void | Promise<void>;
+    onMemoryStatus?: (status: MemoryPersistenceStatus) => void;
 }
 
 const textTranslationRunnerRequestSchema = z.strictObject({
@@ -257,10 +263,12 @@ export class TranslationWorkerRunner implements TranslationRunner, ImageTranslat
     private readonly workerPath: string;
     private readonly workerFactory: (filename: string, options: WorkerOptions) => Worker;
     private readonly onTaskCompleted: ((task: TranslationTask) => void | Promise<void>) | undefined;
+    private readonly onMemoryStatus: ((status: MemoryPersistenceStatus) => void) | undefined;
 
     constructor(options: TranslationWorkerRunnerOptions) {
         this.workerPath = options.workerPath;
         this.onTaskCompleted = options.onTaskCompleted;
+        this.onMemoryStatus = options.onMemoryStatus;
         this.workerFactory = options.workerFactory ?? ((filename, workerOptions) => new Worker(
             filename,
             workerOptions
@@ -342,18 +350,15 @@ export class TranslationWorkerRunner implements TranslationRunner, ImageTranslat
                 if (message.type === 'completed') {
                     finish(() => {
                         void worker.terminate();
-                        if (this.onTaskCompleted !== undefined && parsed.data.kind !== 'image') {
-                            void Promise.resolve(this.onTaskCompleted(
-                                createCompletedSelectionTask(parsed.data, {
-                                    translatedText: message.translatedText,
-                                    model: message.model
-                                })
-                            )).catch(() => undefined);
-                        }
-                        resolve({
+                        const result: TranslationResult = {
                             translatedText: message.translatedText,
                             model: message.model
-                        });
+                        };
+                        if (parsed.data.kind === 'image') {
+                            resolve(result);
+                            return;
+                        }
+                        void this.persistCompletedSelection(parsed.data, result).then(resolve);
                     });
                     return;
                 }
@@ -376,6 +381,31 @@ export class TranslationWorkerRunner implements TranslationRunner, ImageTranslat
                 });
             });
         });
+    }
+
+    private async persistCompletedSelection(
+        request: TranslationRunnerRequest,
+        result: TranslationResult
+    ): Promise<TranslationResult> {
+        if (this.onTaskCompleted === undefined)
+            return result;
+        try {
+            await this.onTaskCompleted(createCompletedSelectionTask(request, result));
+            this.notifyMemoryStatus(memoryRecordedStatus());
+            return result;
+        } catch (error) {
+            const status = memoryFailureStatus(error);
+            this.notifyMemoryStatus(status);
+            return { ...result, memoryStatus: status };
+        }
+    }
+
+    private notifyMemoryStatus(status: MemoryPersistenceStatus): void {
+        try {
+            this.onMemoryStatus?.(status);
+        } catch {
+            return;
+        }
     }
 }
 

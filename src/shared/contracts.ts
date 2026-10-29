@@ -165,6 +165,37 @@ export const memoryEntrySchema = z.strictObject({
     nextDueAt: timestamp
 });
 
+export const memoryPersistenceStatusSchema = z.strictObject({
+    state: z.enum(['recorded', 'failed']),
+    code: z.enum([
+        'busy',
+        'conflict',
+        'internal',
+        'invalid-request',
+        'not-found',
+        'storage',
+        'timeout',
+        'worker'
+    ]).optional(),
+    recoverable: z.literal(true),
+    message: z.string().min(1).max(500)
+}).superRefine((status, context) => {
+    if (status.state === 'recorded' && status.code !== undefined) {
+        context.addIssue({
+            code: 'custom',
+            path: ['code'],
+            message: 'Successful memory status must not include an error code.'
+        });
+    }
+    if (status.state === 'failed' && status.code === undefined) {
+        context.addIssue({
+            code: 'custom',
+            path: ['code'],
+            message: 'Failed memory status requires an error code.'
+        });
+    }
+});
+
 export const quizQuestionSchema = z.strictObject({
     id: nonEmptyString,
     prompt: nonEmptyString,
@@ -274,6 +305,7 @@ export const translationTaskSchema = z.strictObject({
     translationModel: nonEmptyString.optional(),
     error: z.string().optional(),
     errorCode: translationErrorCodeSchema.optional(),
+    memoryStatus: memoryPersistenceStatusSchema.optional(),
     retryInput: translationRetryInputSchema
 }).superRefine((task, context) => {
     if (task.kind === 'screenshot' && task.bounds === undefined) {
@@ -547,6 +579,7 @@ export type TranslationErrorCode = z.infer<typeof translationErrorCodeSchema>;
 export type TranslationError = z.infer<typeof translationErrorSchema>;
 export type TranslationEvent = z.infer<typeof translationEventSchema>;
 export type MemoryEntry = z.infer<typeof memoryEntrySchema>;
+export type MemoryPersistenceStatus = z.infer<typeof memoryPersistenceStatusSchema>;
 export type QuizQuestion = z.infer<typeof quizQuestionSchema>;
 export type QuizFeedback = z.infer<typeof quizFeedbackSchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;

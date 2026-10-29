@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
     MemoryDatabase,
@@ -9,6 +10,7 @@ import {
 import type { TranslationTask } from '../../src/shared/contracts';
 
 const workerPath = resolve(process.cwd(), 'out/main/memoryWorker.js');
+const controlledWorkerPath = resolve(process.cwd(), 'tests/fixtures/memoryWorkerControl.mjs');
 const temporaryDirectories: string[] = [];
 const openDatabases: MemoryDatabase[] = [];
 
@@ -72,6 +74,42 @@ afterEach(async () => {
 });
 
 describe('MemoryDatabase', () => {
+    it('uses Unicode case folding without Turkish dotted-I false equivalence', async () => {
+        const { database } = await createMemory();
+        await database.recordTranslation(completedTask({ id: 'sharp-s', sourceText: 'Straße' }));
+        await database.recordTranslation(completedTask({ id: 'sharp-s-fold', sourceText: 'STRASSE' }));
+        await database.recordTranslation(completedTask({ id: 'dotted-i', sourceText: 'İ', sourceLanguage: 'tr-TR' }));
+        await database.recordTranslation(completedTask({ id: 'dotted-i-fold', sourceText: 'i̇', sourceLanguage: 'tr-TR' }));
+        await database.recordTranslation(completedTask({ id: 'ascii-i', sourceText: 'I', sourceLanguage: 'tr-TR' }));
+        await database.recordTranslation(completedTask({ id: 'dotless-i', sourceText: 'ı', sourceLanguage: 'tr-TR' }));
+
+        const entries = await database.listEntries();
+        expect(entries.find((entry) => entry.normalizedSource === 'strasse')).toMatchObject({
+            occurrenceCount: 2
+        });
+        expect(entries.find((entry) => entry.normalizedSource === 'i̇')).toMatchObject({
+            occurrenceCount: 2
+        });
+        expect(entries.filter((entry) => entry.normalizedSource === 'i')).toHaveLength(1);
+        expect(entries.filter((entry) => entry.normalizedSource === 'ı')).toHaveLength(1);
+    });
+
+    it('normalizes offset filter bounds to epoch milliseconds', async () => {
+        const { database, now } = await createMemory('2026-10-29T01:30:00.000Z');
+        now.value = new Date('2026-10-29T00:30:00.000Z');
+        await database.recordTranslation(completedTask({ id: 'offset-boundary' }));
+        now.value = new Date('2026-10-29T01:30:00.000Z');
+
+        await expect(database.queryHeat({
+            from: '2026-10-29T01:00:00.000+02:00',
+            to: '2026-10-29T03:00:00.000+02:00'
+        })).resolves.toHaveLength(1);
+        await expect(database.queryHeat({
+            from: '2026-10-29T03:00:00.000+02:00',
+            to: '2026-10-29T04:00:00.000+02:00'
+        })).resolves.toHaveLength(0);
+    });
+
     it('deduplicates normalized repeats per task and keeps a stable entry ID', async () => {
         const { database, now } = await createMemory();
         await database.recordTranslation(completedTask({ id: 'task-a', sourceText: '  HELLO\t World ' }));
@@ -193,6 +231,75 @@ describe('MemoryDatabase', () => {
         expect(await database.listEntries()).toMatchObject([{ normalizedSource: 'keep', occurrenceCount: 1 }]);
         await database.recordTranslation(task);
         expect(await database.listEntries({ search: 'hello world' })).toMatchObject([{ id: deleted.id, occurrenceCount: 1, recentOccurrenceCount: 1 }]);
+    });
+
+    it('rolls back earlier records when a later batched occurrence fails', async () => {
+        const { database } = await createMemory();
+        const writes = [
+            database.recordTranslation(completedTask({ id: 'rollback-keep', sourceText: 'Keep' })),
+            database.recordTranslation(completedTask({ id: 'rollback-fail', sourceText: '   ' }))
+        ];
+
+        const results = await Promise.allSettled(writes);
+        expect(results[0].status).toBe('rejected');
+        expect(results[1].status).toBe('rejected');
+        await expect(database.listEntries()).resolves.toEqual([]);
+    });
+
+    it('rejects saturated record queues with a recoverable busy code', async () => {
+        const { database } = await createMemory('2026-10-29T12:00:00.000Z', {
+            maxQueuedRecords: 2
+        });
+        const writes = [
+            database.recordTranslation(completedTask({ id: 'queued-1', sourceText: 'One' })),
+            database.recordTranslation(completedTask({ id: 'queued-2', sourceText: 'Two' })),
+            database.recordTranslation(completedTask({ id: 'queued-3', sourceText: 'Three' }))
+        ];
+
+        const results = await Promise.allSettled(writes);
+        expect(results.slice(0, 2).map((result) => result.status)).toEqual(['fulfilled', 'fulfilled']);
+        expect(results[2]).toMatchObject({
+            status: 'rejected',
+            reason: expect.objectContaining({ code: 'busy' })
+        });
+    });
+
+    it('times out hung requests, rejects pending work, and recycles the worker', async () => {
+        let factoryCalls = 0;
+        const { database } = await createMemory('2026-10-29T12:00:00.000Z', {
+            requestTimeoutMs: 250,
+            workerFactory: (filename, options) => {
+                factoryCalls += 1;
+                return factoryCalls === 1
+                    ? new Worker(controlledWorkerPath, { workerData: { mode: 'hang' } })
+                    : new Worker(filename, options);
+            }
+        });
+        const pending = [database.listEntries(), database.listEntries()];
+        const results = await Promise.allSettled(pending);
+        expect(results.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+        for (const result of results) {
+            if (result.status === 'rejected')
+                expect(result.reason).toMatchObject({ code: 'timeout' });
+        }
+        await expect(database.listEntries()).resolves.toEqual([]);
+        expect(factoryCalls).toBeGreaterThanOrEqual(2);
+    });
+
+    it('rejects crashed workers safely and recreates the worker on the next request', async () => {
+        let factoryCalls = 0;
+        const { database } = await createMemory('2026-10-29T12:00:00.000Z', {
+            workerFactory: (filename, options) => {
+                factoryCalls += 1;
+                return factoryCalls === 1
+                    ? new Worker(controlledWorkerPath, { workerData: { mode: 'crash' } })
+                    : new Worker(filename, options);
+            }
+        });
+
+        await expect(database.listEntries()).rejects.toMatchObject({ code: 'worker' });
+        await expect(database.listEntries()).resolves.toEqual([]);
+        expect(factoryCalls).toBeGreaterThanOrEqual(2);
     });
 
     it('stores only allowlisted vocabulary fields and never provider or capture payloads', async () => {

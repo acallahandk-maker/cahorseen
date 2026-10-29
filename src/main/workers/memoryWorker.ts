@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { parentPort, workerData } from 'node:worker_threads';
 import Database from 'better-sqlite3';
+import { caseFold } from 'unicode-case-folding';
 import { z } from 'zod';
 import {
     type HeatStatistic,
@@ -9,8 +10,6 @@ import {
 } from '../../shared/contracts';
 import {
     memoryWorkerRequestSchema,
-    type MemoryEntryPatch,
-    type MemoryFilter,
     type MemoryWorkerRequest
 } from '../services/memoryDatabase';
 
@@ -26,14 +25,37 @@ type EntryRow = {
     translated_text: string;
     source_language: string;
     target_language: string;
+    first_seen_at_ms: number;
+    last_used_at_ms: number;
+    context: string;
+    quiz_interval_days: number;
+    next_due_at_ms: number;
+    occurrence_count: number;
+    recent_occurrence_count: number;
+};
+
+type LegacyEntryRow = {
+    id: string;
+    source_text: string;
+    normalized_source: string;
+    translated_text: string;
+    source_language: string;
+    target_language: string;
     first_seen_at: string;
     last_used_at: string;
     context: string;
     quiz_interval_days: number;
     next_due_at: string;
-    occurrence_count: number;
-    recent_occurrence_count: number;
 };
+
+type LegacyOccurrenceRow = {
+    entry_id: string;
+    task_id: string;
+    occurred_at: string;
+};
+
+type WorkerFilter = Extract<MemoryWorkerRequest, { operation: 'queryHeat' }>['filter'];
+type WorkerEntryPatch = Extract<MemoryWorkerRequest, { operation: 'updateEntry' }>['patch'];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_WINDOW_MS = 7 * DAY_MS;
@@ -42,11 +64,10 @@ function normalizeSource(value: string): string {
     const normalized = value
         .normalize('NFKC')
         .trim()
-        .replace(/\s+/gu, ' ')
-        .toLowerCase();
+        .replace(/\s+/gu, ' ');
     if (normalized.length === 0)
         throw new Error('source text must contain non-whitespace characters');
-    return normalized;
+    return caseFold(normalized);
 }
 
 function normalizeLanguage(value: string | undefined, fallback: string): string {
@@ -67,12 +88,19 @@ function entryId(normalizedSource: string, sourceLanguage: string, targetLanguag
         .slice(0, 32);
 }
 
-function toIso(value: Date): string {
-    return value.toISOString();
+function toIso(milliseconds: number): string {
+    return new Date(milliseconds).toISOString();
 }
 
-function addDays(value: string, days: number): string {
-    return toIso(new Date(Date.parse(value) + days * DAY_MS));
+function toEpochMilliseconds(value: string): number {
+    const milliseconds = Date.parse(value);
+    if (!Number.isFinite(milliseconds))
+        throw new Error('invalid timestamp');
+    return milliseconds;
+}
+
+function addDays(milliseconds: number, days: number): number {
+    return milliseconds + days * DAY_MS;
 }
 
 function isUniqueConstraint(error: unknown): boolean {
@@ -80,10 +108,82 @@ function isUniqueConstraint(error: unknown): boolean {
         && (error.message.includes('UNIQUE') || error.message.includes('constraint failed'));
 }
 
+function isInputError(error: unknown): boolean {
+    return error instanceof Error
+        && (error.message === 'invalid timestamp'
+            || error.message === 'source text must contain non-whitespace characters');
+}
+
+function createLegacySchema(database: DatabaseType, now: string): void {
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS entries (
+            id TEXT PRIMARY KEY,
+            source_text TEXT NOT NULL,
+            normalized_source TEXT NOT NULL,
+            translated_text TEXT NOT NULL,
+            source_language TEXT NOT NULL,
+            target_language TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            last_used_at TEXT NOT NULL,
+            context TEXT NOT NULL,
+            quiz_interval_days INTEGER NOT NULL CHECK (quiz_interval_days > 0),
+            next_due_at TEXT NOT NULL,
+            UNIQUE(normalized_source, source_language, target_language)
+        );
+        CREATE TABLE IF NOT EXISTS occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            UNIQUE(entry_id, task_id),
+            FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO metadata(key, value) VALUES ('memory_enabled', '1');
+        INSERT INTO schema_migrations(version, applied_at) VALUES (1, '${now}');
+    `);
+}
+
+function createEpochSchema(database: DatabaseType): void {
+    database.exec(`
+        CREATE TABLE entries (
+            id TEXT PRIMARY KEY,
+            source_text TEXT NOT NULL,
+            normalized_source TEXT NOT NULL,
+            translated_text TEXT NOT NULL,
+            source_language TEXT NOT NULL,
+            target_language TEXT NOT NULL,
+            first_seen_at_ms INTEGER NOT NULL,
+            last_used_at_ms INTEGER NOT NULL,
+            context TEXT NOT NULL,
+            quiz_interval_days INTEGER NOT NULL CHECK (quiz_interval_days > 0),
+            next_due_at_ms INTEGER NOT NULL,
+            UNIQUE(normalized_source, source_language, target_language)
+        );
+        CREATE TABLE occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            occurred_at_ms INTEGER NOT NULL,
+            UNIQUE(entry_id, task_id),
+            FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+        );
+        CREATE INDEX idx_entries_normalized_source ON entries(normalized_source);
+        CREATE INDEX idx_entries_language_timestamps
+            ON entries(source_language, target_language, last_used_at_ms);
+        CREATE INDEX idx_entries_last_used_at_ms ON entries(last_used_at_ms);
+        CREATE INDEX idx_occurrences_entry_time
+            ON occurrences(entry_id, occurred_at_ms);
+        CREATE INDEX idx_occurrences_time ON occurrences(occurred_at_ms);
+    `);
+}
+
 function migrate(database: DatabaseType, now: string): void {
     database.pragma('journal_mode = WAL');
     database.pragma('synchronous = FULL');
-    database.pragma('foreign_keys = ON');
     database.exec(`
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -93,50 +193,58 @@ function migrate(database: DatabaseType, now: string): void {
     const current = database.prepare(
         'SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations'
     ).get() as { version: number };
-    if (current.version < 1) {
-        database.transaction(() => {
-            database.exec(`
-                CREATE TABLE IF NOT EXISTS entries (
-                    id TEXT PRIMARY KEY,
-                    source_text TEXT NOT NULL,
-                    normalized_source TEXT NOT NULL,
-                    translated_text TEXT NOT NULL,
-                    source_language TEXT NOT NULL,
-                    target_language TEXT NOT NULL,
-                    first_seen_at TEXT NOT NULL,
-                    last_used_at TEXT NOT NULL,
-                    context TEXT NOT NULL,
-                    quiz_interval_days INTEGER NOT NULL CHECK (quiz_interval_days > 0),
-                    next_due_at TEXT NOT NULL,
-                    UNIQUE(normalized_source, source_language, target_language)
-                );
-                CREATE TABLE IF NOT EXISTS occurrences (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    entry_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    UNIQUE(entry_id, task_id),
-                    FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_entries_normalized_source
-                    ON entries(normalized_source);
-                CREATE INDEX IF NOT EXISTS idx_entries_language_timestamps
-                    ON entries(source_language, target_language, last_used_at);
-                CREATE INDEX IF NOT EXISTS idx_entries_last_used_at
-                    ON entries(last_used_at);
-                CREATE INDEX IF NOT EXISTS idx_occurrences_entry_time
-                    ON occurrences(entry_id, occurred_at);
-                CREATE INDEX IF NOT EXISTS idx_occurrences_time
-                    ON occurrences(occurred_at);
-                CREATE TABLE IF NOT EXISTS metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                INSERT OR IGNORE INTO metadata(key, value) VALUES ('memory_enabled', '1');
-                INSERT INTO schema_migrations(version, applied_at) VALUES (1, '${now}');
-            `);
-        })();
+    if (current.version < 1)
+        database.transaction(() => createLegacySchema(database, now))();
+    if (current.version < 2) {
+        const entries = database.prepare('SELECT * FROM entries').all() as LegacyEntryRow[];
+        const occurrences = database.prepare('SELECT * FROM occurrences').all() as LegacyOccurrenceRow[];
+        database.pragma('foreign_keys = OFF');
+        try {
+            database.transaction(() => {
+                database.exec('DROP TABLE occurrences; DROP TABLE entries;');
+                createEpochSchema(database);
+                const insertEntry = database.prepare(`
+                    INSERT INTO entries (
+                        id, source_text, normalized_source, translated_text,
+                        source_language, target_language, first_seen_at_ms,
+                        last_used_at_ms, context, quiz_interval_days, next_due_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `);
+                for (const entry of entries) {
+                    insertEntry.run(
+                        entry.id,
+                        entry.source_text,
+                        entry.normalized_source,
+                        entry.translated_text,
+                        entry.source_language,
+                        entry.target_language,
+                        toEpochMilliseconds(entry.first_seen_at),
+                        toEpochMilliseconds(entry.last_used_at),
+                        entry.context,
+                        entry.quiz_interval_days,
+                        toEpochMilliseconds(entry.next_due_at)
+                    );
+                }
+                const insertOccurrence = database.prepare(`
+                    INSERT INTO occurrences(entry_id, task_id, occurred_at_ms)
+                    VALUES (?, ?, ?)
+                `);
+                for (const occurrence of occurrences) {
+                    insertOccurrence.run(
+                        occurrence.entry_id,
+                        occurrence.task_id,
+                        toEpochMilliseconds(occurrence.occurred_at)
+                    );
+                }
+                database.prepare(
+                    'INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?)'
+                ).run(now);
+            })();
+        } finally {
+            database.pragma('foreign_keys = ON');
+        }
     }
+    database.pragma('foreign_keys = ON');
 }
 
 function memoryEnabled(database: DatabaseType): boolean {
@@ -149,7 +257,7 @@ function memoryEnabled(database: DatabaseType): boolean {
 function writeRecord(
     database: DatabaseType,
     task: TranslationTask,
-    recordedAt: string
+    recordedAtMs: number
 ): void {
     const normalizedSource = normalizeSource(task.sourceText);
     const sourceLanguage = normalizeLanguage(task.sourceLanguage, 'unknown');
@@ -165,15 +273,15 @@ function writeRecord(
             id = `${id}:${randomUUID()}`;
     }
     const previous = database.prepare(`
-        SELECT first_seen_at, last_used_at
+        SELECT first_seen_at_ms, last_used_at_ms
         FROM entries WHERE id = ?
-    `).get(id) as { first_seen_at: string; last_used_at: string } | undefined;
+    `).get(id) as { first_seen_at_ms: number; last_used_at_ms: number } | undefined;
     if (previous === undefined) {
         database.prepare(`
             INSERT INTO entries (
                 id, source_text, normalized_source, translated_text,
-                source_language, target_language, first_seen_at, last_used_at,
-                context, quiz_interval_days, next_due_at
+                source_language, target_language, first_seen_at_ms, last_used_at_ms,
+                context, quiz_interval_days, next_due_at_ms
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         `).run(
             id,
@@ -182,41 +290,41 @@ function writeRecord(
             task.translatedText,
             sourceLanguage,
             targetLanguage,
-            recordedAt,
-            recordedAt,
+            recordedAtMs,
+            recordedAtMs,
             '',
-            addDays(recordedAt, 1)
+            addDays(recordedAtMs, 1)
         );
     } else {
         database.prepare(`
             UPDATE entries SET
-                first_seen_at = CASE WHEN ? < first_seen_at THEN ? ELSE first_seen_at END,
-                last_used_at = CASE WHEN ? > last_used_at THEN ? ELSE last_used_at END,
-                translated_text = CASE WHEN ? >= last_used_at THEN ? ELSE translated_text END,
-                context = CASE WHEN ? >= last_used_at THEN ? ELSE context END
+                first_seen_at_ms = CASE WHEN ? < first_seen_at_ms THEN ? ELSE first_seen_at_ms END,
+                last_used_at_ms = CASE WHEN ? > last_used_at_ms THEN ? ELSE last_used_at_ms END,
+                translated_text = CASE WHEN ? >= last_used_at_ms THEN ? ELSE translated_text END,
+                context = CASE WHEN ? >= last_used_at_ms THEN ? ELSE context END
             WHERE id = ?
         `).run(
-            recordedAt,
-            recordedAt,
-            recordedAt,
-            recordedAt,
-            recordedAt,
+            recordedAtMs,
+            recordedAtMs,
+            recordedAtMs,
+            recordedAtMs,
+            recordedAtMs,
             task.translatedText,
-            recordedAt,
+            recordedAtMs,
             '',
             id
         );
     }
     database.prepare(`
-        INSERT INTO occurrences(entry_id, task_id, occurred_at)
+        INSERT INTO occurrences(entry_id, task_id, occurred_at_ms)
         VALUES (?, ?, ?)
         ON CONFLICT(entry_id, task_id) DO NOTHING
-    `).run(id, task.id, recordedAt);
+    `).run(id, task.id, recordedAtMs);
 }
 
-function filterSql(filter: MemoryFilter): { sql: string; parameters: string[] } {
+function filterSql(filter: WorkerFilter): { sql: string; parameters: (string | number)[] } {
     const clauses: string[] = [];
-    const parameters: string[] = [];
+    const parameters: (string | number)[] = [];
     if (filter.sourceLanguage !== undefined) {
         clauses.push('e.source_language = ?');
         parameters.push(normalizeLanguage(filter.sourceLanguage, 'unknown'));
@@ -225,15 +333,15 @@ function filterSql(filter: MemoryFilter): { sql: string; parameters: string[] } 
         clauses.push('e.target_language = ?');
         parameters.push(normalizeLanguage(filter.targetLanguage, 'unknown'));
     }
-    if (filter.from !== undefined || filter.to !== undefined) {
+    if (filter.fromMs !== undefined || filter.toMs !== undefined) {
         const bounds: string[] = [];
-        if (filter.from !== undefined) {
-            bounds.push('filter_occurrences.occurred_at >= ?');
-            parameters.push(filter.from);
+        if (filter.fromMs !== undefined) {
+            bounds.push('filter_occurrences.occurred_at_ms >= ?');
+            parameters.push(filter.fromMs);
         }
-        if (filter.to !== undefined) {
-            bounds.push('filter_occurrences.occurred_at <= ?');
-            parameters.push(filter.to);
+        if (filter.toMs !== undefined) {
+            bounds.push('filter_occurrences.occurred_at_ms <= ?');
+            parameters.push(filter.toMs);
         }
         clauses.push(`EXISTS (
             SELECT 1 FROM occurrences filter_occurrences
@@ -249,24 +357,25 @@ function filterSql(filter: MemoryFilter): { sql: string; parameters: string[] } 
 
 function queryEntries(
     database: DatabaseType,
-    filter: MemoryFilter,
-    now: string,
+    filter: WorkerFilter,
+    nowMs: number,
     search?: string,
     limit?: number
 ): EntryRow[] {
     const filterPart = filterSql(filter);
     const clauses = filterPart.sql === '' ? [] : [filterPart.sql.slice(6)];
-    const parameters = [...filterPart.parameters];
-    if (search !== undefined && search.length > 0) {
+    const parameters: (string | number)[] = [...filterPart.parameters];
+    const normalizedSearch = search?.normalize('NFKC').trim().replace(/\s+/gu, ' ');
+    if (normalizedSearch !== undefined && normalizedSearch.length > 0) {
         clauses.push(`(
             e.normalized_source LIKE ?
-            OR LOWER(e.source_text) LIKE ?
-            OR LOWER(e.translated_text) LIKE ?
+            OR e.source_text LIKE ?
+            OR e.translated_text LIKE ?
         )`);
-        const term = `%${normalizeSource(search)}%`;
+        const term = `%${caseFold(normalizedSearch)}%`;
         parameters.push(term, term, term);
     }
-    const recentStart = toIso(new Date(Date.parse(now) - RECENT_WINDOW_MS));
+    const recentStartMs = nowMs - RECENT_WINDOW_MS;
     const where = clauses.length === 0 ? '' : `WHERE ${clauses.join(' AND ')}`;
     const rows = database.prepare(`
         SELECT e.*,
@@ -274,15 +383,15 @@ function queryEntries(
              WHERE count_occurrences.entry_id = e.id) AS occurrence_count,
             (SELECT COUNT(*) FROM occurrences recent_occurrences
              WHERE recent_occurrences.entry_id = e.id
-               AND recent_occurrences.occurred_at >= ?
-               AND recent_occurrences.occurred_at <= ?) AS recent_occurrence_count
+               AND recent_occurrences.occurred_at_ms >= ?
+               AND recent_occurrences.occurred_at_ms <= ?) AS recent_occurrence_count
         FROM entries e
         ${where}
-        ORDER BY e.last_used_at DESC, e.id ASC
+        ORDER BY e.last_used_at_ms DESC, e.id ASC
         ${limit === undefined ? '' : 'LIMIT ?'}
     `).all(
-        recentStart,
-        now,
+        recentStartMs,
+        nowMs,
         ...parameters,
         ...(limit === undefined ? [] : [limit])
     ) as EntryRow[];
@@ -300,11 +409,11 @@ function toMemoryEntry(row: EntryRow): MemoryEntry {
         occurrenceCount: row.occurrence_count,
         recentOccurrenceCount: row.recent_occurrence_count,
         translationCount: row.occurrence_count,
-        firstSeenAt: row.first_seen_at,
-        lastUsedAt: row.last_used_at,
+        firstSeenAt: toIso(row.first_seen_at_ms),
+        lastUsedAt: toIso(row.last_used_at_ms),
         context: row.context,
         quizIntervalDays: row.quiz_interval_days,
-        nextDueAt: row.next_due_at
+        nextDueAt: toIso(row.next_due_at_ms)
     };
 }
 
@@ -317,7 +426,7 @@ function toHeatStatistic(row: EntryRow): HeatStatistic {
         targetLanguage: row.target_language,
         occurrenceCount: row.occurrence_count,
         recentOccurrenceCount: row.recent_occurrence_count,
-        lastUsedAt: row.last_used_at
+        lastUsedAt: toIso(row.last_used_at_ms)
     };
 }
 
@@ -325,14 +434,14 @@ function csvValue(value: string | number): string {
     return `"${String(value).replace(/"/gu, '""')}"`;
 }
 
-function exportRows(rows: EntryRow[], now: string, format: 'json' | 'csv'): string {
+function exportRows(rows: EntryRow[], nowMs: number, format: 'json' | 'csv'): string {
     const entries = rows
         .map(toMemoryEntry)
         .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
     if (format === 'json') {
         return JSON.stringify({
             version: 1,
-            exportedAt: now,
+            exportedAt: toIso(nowMs),
             entries
         }, null, 2);
     }
@@ -377,7 +486,7 @@ function exportRows(rows: EntryRow[], now: string, format: 'json' | 'csv'): stri
 function updateEntry(
     database: DatabaseType,
     id: string,
-    patch: MemoryEntryPatch
+    patch: WorkerEntryPatch
 ): boolean {
     const row = database.prepare('SELECT * FROM entries WHERE id = ?').get(id) as {
         source_text: string;
@@ -387,7 +496,7 @@ function updateEntry(
         target_language: string;
         context: string;
         quiz_interval_days: number;
-        next_due_at: string;
+        next_due_at_ms: number;
     } | undefined;
     if (row === undefined)
         return false;
@@ -400,7 +509,7 @@ function updateEntry(
         UPDATE entries SET
             source_text = ?, normalized_source = ?, translated_text = ?,
             source_language = ?, target_language = ?, context = ?,
-            quiz_interval_days = ?, next_due_at = ?
+            quiz_interval_days = ?, next_due_at_ms = ?
         WHERE id = ?
     `).run(
         sourceText.trim(),
@@ -410,7 +519,7 @@ function updateEntry(
         targetLanguage,
         patch.context ?? row.context,
         patch.quizIntervalDays ?? row.quiz_interval_days,
-        patch.nextDueAt ?? row.next_due_at,
+        patch.nextDueAtMs ?? row.next_due_at_ms,
         id
     );
     return true;
@@ -436,13 +545,13 @@ function handleRequest(database: DatabaseType, request: MemoryWorkerRequest): un
                 return { recorded: 0 };
             const write = database.transaction((records: typeof request.records) => {
                 for (const record of records)
-                    writeRecord(database, record.task, record.recordedAt);
+                    writeRecord(database, record.task, record.recordedAtMs);
             });
             write(request.records);
             return { recorded: request.records.length };
         }
         case 'queryHeat': {
-            const rows = queryEntries(database, request.filter, request.now);
+            const rows = queryEntries(database, request.filter, request.nowMs);
             return {
                 statistics: rows
                     .map(toHeatStatistic)
@@ -461,7 +570,7 @@ function handleRequest(database: DatabaseType, request: MemoryWorkerRequest): un
                 entries: queryEntries(
                     database,
                     request.query,
-                    request.now,
+                    request.nowMs,
                     request.query.search,
                     request.query.limit
                 ).map(toMemoryEntry)
@@ -473,8 +582,8 @@ function handleRequest(database: DatabaseType, request: MemoryWorkerRequest): un
         case 'exportEntries':
             return {
                 value: exportRows(
-                    queryEntries(database, {}, request.now),
-                    request.now,
+                    queryEntries(database, {}, request.nowMs),
+                    request.nowMs,
                     request.format
                 )
             };
@@ -519,7 +628,9 @@ function run(database: DatabaseType): void {
                 requestId: request.requestId,
                 ok: false,
                 error: {
-                    code: isUniqueConstraint(error) ? 'conflict' : 'internal',
+                    code: isUniqueConstraint(error)
+                        ? 'conflict'
+                        : isInputError(error) ? 'invalid-request' : 'internal',
                     message: error instanceof Error ? error.message.slice(0, 500) : 'Memory operation failed.'
                 }
             });
@@ -529,5 +640,5 @@ function run(database: DatabaseType): void {
 
 const parsedOptions = databaseOptionsSchema.parse(workerData);
 const database = new Database(parsedOptions.databasePath);
-migrate(database, toIso(new Date()));
+migrate(database, toIso(Date.now()));
 run(database);

@@ -10,6 +10,7 @@ import {
     type SelectionCapture,
     type SelectionErrorCode,
     type TranslationErrorCode,
+    type MemoryPersistenceStatus,
     type TranslationTask
 } from '../../shared/contracts';
 import {
@@ -23,6 +24,11 @@ import {
     type TranslationRunner
 } from '../workers/translationWorker';
 import { getActiveProviderConfig } from './secureConfig';
+import {
+    memoryFailureStatus,
+    memoryRecordedStatus,
+    recordTranslation as recordTranslationMemory
+} from './memoryDatabase';
 
 export type { TranslationRunner };
 
@@ -39,6 +45,8 @@ export interface SelectionServiceOptions {
     translationRunner: TranslationRunner;
     getProvider(): Promise<ProviderConfig>;
     createId?: () => string;
+    recordTranslation?: (task: TranslationTask) => Promise<void>;
+    onMemoryStatus?: (status: MemoryPersistenceStatus) => void;
 }
 
 export interface SelectionTranslationOptions {
@@ -157,12 +165,16 @@ export class SelectionService {
     private readonly translationRunner: TranslationRunner;
     private readonly getProvider: () => Promise<ProviderConfig>;
     private readonly createId: () => string;
+    private readonly recordTranslation: ((task: TranslationTask) => Promise<void>) | undefined;
+    private readonly onMemoryStatus: ((status: MemoryPersistenceStatus) => void) | undefined;
 
     constructor(options: SelectionServiceOptions) {
         this.captureAdapter = options.captureAdapter;
         this.translationRunner = options.translationRunner;
         this.getProvider = options.getProvider;
         this.createId = options.createId ?? randomUUID;
+        this.recordTranslation = options.recordTranslation;
+        this.onMemoryStatus = options.onMemoryStatus;
     }
 
     async captureSelectionOnce(signal?: AbortSignal): Promise<SelectionCapture> {
@@ -237,7 +249,7 @@ export class SelectionService {
                 options.signal,
                 options.onDelta
             );
-            return {
+            return this.persistCompletedTask({
                 id: taskId,
                 status: 'completed',
                 kind: 'selection',
@@ -255,7 +267,7 @@ export class SelectionService {
                 textModel: provider.textModel,
                 visionModel: provider.visionModel,
                 translationModel: result.model
-            };
+            });
         } catch (error) {
             return {
                 id: taskId,
@@ -279,6 +291,28 @@ export class SelectionService {
                 error: safeTaskError(error),
                 errorCode: safeTaskErrorCode(error)
             };
+        }
+    }
+
+    private async persistCompletedTask(task: TranslationTask): Promise<TranslationTask> {
+        if (this.recordTranslation === undefined)
+            return task;
+        try {
+            await this.recordTranslation(task);
+            this.notifyMemoryStatus(memoryRecordedStatus());
+            return task;
+        } catch (error) {
+            const status = memoryFailureStatus(error);
+            this.notifyMemoryStatus(status);
+            return { ...task, memoryStatus: status };
+        }
+    }
+
+    private notifyMemoryStatus(status: MemoryPersistenceStatus): void {
+        try {
+            this.onMemoryStatus?.(status);
+        } catch {
+            return;
         }
     }
 
@@ -442,7 +476,8 @@ async function getDefaultService(): Promise<SelectionService> {
         translationRunner: new TranslationWorkerRunner({
             workerPath: join(__dirname, 'translationWorker.js')
         }),
-        getProvider: getActiveProviderConfig
+        getProvider: getActiveProviderConfig,
+        recordTranslation: recordTranslationMemory
     });
     return defaultService;
 }

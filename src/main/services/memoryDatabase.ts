@@ -9,15 +9,18 @@ import {
     MAX_TRANSLATED_TEXT_CHARS,
     heatStatisticSchema,
     memoryEntrySchema,
+    memoryPersistenceStatusSchema,
     translationTaskSchema,
     type HeatStatistic,
     type MemoryEntry,
+    type MemoryPersistenceStatus,
     type TranslationTask
 } from '../../shared/contracts';
 
 const timestampSchema = z.string().datetime({ offset: true });
 const nonEmptyString = z.string().min(1);
 const positiveInteger = z.number().int().positive();
+const epochMilliseconds = z.number().int();
 
 export const memoryFilterSchema = z.strictObject({
     sourceLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
@@ -52,7 +55,16 @@ export type MemoryEntryQuery = z.infer<typeof memoryEntryQuerySchema>;
 export type MemoryEntryPatch = z.infer<typeof memoryEntryPatchSchema>;
 
 const memoryErrorSchema = z.strictObject({
-    code: z.enum(['invalid-request', 'conflict', 'not-found', 'storage', 'internal']),
+    code: z.enum([
+        'busy',
+        'conflict',
+        'internal',
+        'invalid-request',
+        'not-found',
+        'storage',
+        'timeout',
+        'worker'
+    ]),
     message: z.string().max(500)
 });
 
@@ -68,9 +80,52 @@ export class MemoryDatabaseError extends Error {
     }
 }
 
+export function memoryFailureStatus(error: unknown): MemoryPersistenceStatus {
+    const code = error instanceof MemoryDatabaseError ? error.code : 'internal';
+    const message = error instanceof Error && error.message.length > 0
+        ? error.message
+        : 'Translation memory persistence failed.';
+    return memoryPersistenceStatusSchema.parse({
+        state: 'failed',
+        code,
+        recoverable: true,
+        message: message.slice(0, 500)
+    });
+}
+
+export function memoryRecordedStatus(): MemoryPersistenceStatus {
+    return memoryPersistenceStatusSchema.parse({
+        state: 'recorded',
+        recoverable: true,
+        message: 'Translation memory recorded.'
+    });
+}
+
+const workerFilterSchema = z.strictObject({
+    sourceLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    fromMs: epochMilliseconds.optional(),
+    toMs: epochMilliseconds.optional()
+});
+
+const workerEntryQuerySchema = workerFilterSchema.extend({
+    search: z.string().max(MAX_SOURCE_TEXT_CHARS).optional(),
+    limit: z.number().int().min(1).max(10_000).optional()
+});
+
+const workerEntryPatchSchema = z.strictObject({
+    sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS).optional(),
+    translatedText: z.string().max(MAX_TRANSLATED_TEXT_CHARS).optional(),
+    sourceLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    context: z.string().max(MAX_CONTEXT_CHARS).optional(),
+    quizIntervalDays: positiveInteger.optional(),
+    nextDueAtMs: epochMilliseconds.optional()
+});
+
 const recordInputSchema = z.strictObject({
     task: translationTaskSchema,
-    recordedAt: timestampSchema
+    recordedAtMs: epochMilliseconds
 });
 
 export const memoryWorkerRequestSchema = z.discriminatedUnion('operation', [
@@ -82,20 +137,20 @@ export const memoryWorkerRequestSchema = z.discriminatedUnion('operation', [
     z.strictObject({
         requestId: nonEmptyString,
         operation: z.literal('queryHeat'),
-        filter: memoryFilterSchema,
-        now: timestampSchema
+        filter: workerFilterSchema,
+        nowMs: epochMilliseconds
     }),
     z.strictObject({
         requestId: nonEmptyString,
         operation: z.literal('listEntries'),
-        query: memoryEntryQuerySchema,
-        now: timestampSchema
+        query: workerEntryQuerySchema,
+        nowMs: epochMilliseconds
     }),
     z.strictObject({
         requestId: nonEmptyString,
         operation: z.literal('updateEntry'),
         id: nonEmptyString,
-        patch: memoryEntryPatchSchema
+        patch: workerEntryPatchSchema
     }),
     z.strictObject({
         requestId: nonEmptyString,
@@ -106,7 +161,7 @@ export const memoryWorkerRequestSchema = z.discriminatedUnion('operation', [
         requestId: nonEmptyString,
         operation: z.literal('exportEntries'),
         format: z.enum(['json', 'csv']),
-        now: timestampSchema
+        nowMs: epochMilliseconds
     }),
     z.strictObject({
         requestId: nonEmptyString,
@@ -186,6 +241,7 @@ export interface MemoryDatabaseOptions {
     workerFactory?: (filename: string, options: WorkerOptions) => Worker;
     now?: () => Date;
     requestTimeoutMs?: number;
+    maxQueuedRecords?: number;
 }
 
 interface PendingRequest {
@@ -197,15 +253,43 @@ interface PendingRequest {
 
 interface PendingRecord {
     task: TranslationTask;
-    recordedAt: string;
+    recordedAtMs: number;
     resolve: () => void;
     reject: (error: MemoryDatabaseError) => void;
 }
 
-function toIso(value: Date): string {
-    if (Number.isNaN(value.getTime()))
+function toEpochMilliseconds(value: Date | string): number {
+    const milliseconds = value instanceof Date ? value.getTime() : Date.parse(value);
+    if (!Number.isFinite(milliseconds))
         throw new MemoryDatabaseError('invalid-request', 'The clock returned an invalid date.');
-    return value.toISOString();
+    return milliseconds;
+}
+
+function toWorkerFilter(filter: MemoryFilter): z.infer<typeof workerFilterSchema> {
+    return {
+        ...(filter.sourceLanguage === undefined ? {} : { sourceLanguage: filter.sourceLanguage }),
+        ...(filter.targetLanguage === undefined ? {} : { targetLanguage: filter.targetLanguage }),
+        ...(filter.from === undefined ? {} : { fromMs: toEpochMilliseconds(filter.from) }),
+        ...(filter.to === undefined ? {} : { toMs: toEpochMilliseconds(filter.to) })
+    };
+}
+
+function toWorkerQuery(query: MemoryEntryQuery): z.infer<typeof workerEntryQuerySchema> {
+    return {
+        ...toWorkerFilter(query),
+        ...(query.search === undefined ? {} : { search: query.search }),
+        ...(query.limit === undefined ? {} : { limit: query.limit })
+    };
+}
+
+function toWorkerPatch(patch: MemoryEntryPatch): z.infer<typeof workerEntryPatchSchema> {
+    const { nextDueAt, ...safePatch } = patch;
+    return {
+        ...safePatch,
+        ...(nextDueAt === undefined ? {} : {
+            nextDueAtMs: toEpochMilliseconds(nextDueAt)
+        })
+    };
 }
 
 function parseResponse(value: unknown): WorkerResponse {
@@ -221,13 +305,21 @@ export class MemoryDatabase {
     private readonly workerFactory: (filename: string, options: WorkerOptions) => Worker;
     private readonly now: () => Date;
     private readonly requestTimeoutMs: number;
+    private readonly maxQueuedRecords: number;
     private worker: Worker | undefined;
     private readonly pending = new Map<string, PendingRequest>();
     private recordQueue: PendingRecord[] = [];
     private recordFlushScheduled = false;
     private closed = false;
+    private closing = false;
 
     constructor(options: MemoryDatabaseOptions) {
+        if (!Number.isInteger(options.requestTimeoutMs ?? 15_000)
+            || (options.requestTimeoutMs ?? 15_000) < 1)
+            throw new MemoryDatabaseError('invalid-request', 'Request timeout must be positive.');
+        if (!Number.isInteger(options.maxQueuedRecords ?? 1_024)
+            || (options.maxQueuedRecords ?? 1_024) < 1)
+            throw new MemoryDatabaseError('invalid-request', 'Record queue limit must be positive.');
         this.databasePath = options.databasePath;
         this.workerPath = options.workerPath;
         this.workerFactory = options.workerFactory ?? ((filename, workerOptions) => new Worker(
@@ -236,16 +328,19 @@ export class MemoryDatabase {
         ));
         this.now = options.now ?? (() => new Date());
         this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+        this.maxQueuedRecords = options.maxQueuedRecords ?? 1_024;
     }
 
     async recordTranslation(task: TranslationTask): Promise<void> {
         const parsed = translationTaskSchema.safeParse(task);
         if (!parsed.success || parsed.data.status !== 'completed')
             throw new MemoryDatabaseError('invalid-request', 'Only completed translation tasks can be recorded.');
+        if (this.recordQueue.length >= this.maxQueuedRecords)
+            throw new MemoryDatabaseError('busy', 'The translation memory queue is saturated.');
         return new Promise<void>((resolve, reject) => {
             this.recordQueue.push({
                 task: parsed.data,
-                recordedAt: toIso(this.now()),
+                recordedAtMs: toEpochMilliseconds(this.now()),
                 resolve,
                 reject
             });
@@ -257,8 +352,8 @@ export class MemoryDatabase {
         const request: MemoryWorkerRequest = {
             requestId: randomUUID(),
             operation: 'queryHeat',
-            filter: memoryFilterSchema.parse(filter),
-            now: toIso(this.now())
+            filter: toWorkerFilter(memoryFilterSchema.parse(filter)),
+            nowMs: toEpochMilliseconds(this.now())
         };
         const response = await this.send(request);
         if (response.operation !== 'queryHeat')
@@ -270,8 +365,8 @@ export class MemoryDatabase {
         const request: MemoryWorkerRequest = {
             requestId: randomUUID(),
             operation: 'listEntries',
-            query: memoryEntryQuerySchema.parse(query),
-            now: toIso(this.now())
+            query: toWorkerQuery(memoryEntryQuerySchema.parse(query)),
+            nowMs: toEpochMilliseconds(this.now())
         };
         const response = await this.send(request);
         if (response.operation !== 'listEntries')
@@ -284,7 +379,7 @@ export class MemoryDatabase {
             requestId: randomUUID(),
             operation: 'updateEntry',
             id: nonEmptyString.parse(id),
-            patch: memoryEntryPatchSchema.parse(patch)
+            patch: toWorkerPatch(memoryEntryPatchSchema.parse(patch))
         };
         const response = await this.send(request);
         if (response.operation !== 'updateEntry' || !response.result.updated)
@@ -307,7 +402,7 @@ export class MemoryDatabase {
             requestId: randomUUID(),
             operation: 'exportEntries',
             format: z.enum(['json', 'csv']).parse(format),
-            now: toIso(this.now())
+            nowMs: toEpochMilliseconds(this.now())
         };
         const response = await this.send(request);
         if (response.operation !== 'exportEntries')
@@ -331,6 +426,7 @@ export class MemoryDatabase {
             return;
         await this.flushRecords();
         this.closed = true;
+        this.closing = true;
         const worker = this.worker;
         if (worker === undefined)
             return;
@@ -361,7 +457,7 @@ export class MemoryDatabase {
                     operation: 'recordTranslations',
                     records: records.map((record) => ({
                         task: record.task,
-                        recordedAt: record.recordedAt
+                        recordedAtMs: record.recordedAtMs
                     }))
                 });
                 if (response.operation !== 'recordTranslations')
@@ -391,11 +487,12 @@ export class MemoryDatabase {
             try {
                 response = parseResponse(raw);
             } catch (error) {
-                for (const pending of this.pending.values()) {
-                    clearTimeout(pending.timer);
-                    pending.reject(error as MemoryDatabaseError);
-                }
-                this.pending.clear();
+                this.recycleWorker(
+                    worker,
+                    error instanceof MemoryDatabaseError
+                        ? error
+                        : new MemoryDatabaseError('internal', 'The memory worker returned an invalid response.')
+                );
                 return;
             }
             const pending = this.pending.get(response.requestId);
@@ -409,32 +506,37 @@ export class MemoryDatabase {
                 pending.reject(new MemoryDatabaseError(response.error.code, response.error.message));
         });
         worker.once('error', () => {
-            this.rejectAll(new MemoryDatabaseError('internal', 'The memory worker failed.'));
+            this.recycleWorker(worker, new MemoryDatabaseError('worker', 'The memory worker failed.'));
         });
         worker.once('exit', () => {
-            this.worker = undefined;
-            this.rejectAll(new MemoryDatabaseError('internal', 'The memory worker stopped unexpectedly.'));
+            if (this.worker === worker && !this.closing)
+                this.recycleWorker(worker, new MemoryDatabaseError('worker', 'The memory worker stopped unexpectedly.'));
         });
         this.worker = worker;
         return worker;
     }
 
-    private rejectAll(error: MemoryDatabaseError): void {
+    private rejectPending(error: MemoryDatabaseError): void {
         for (const pending of this.pending.values()) {
             clearTimeout(pending.timer);
             pending.reject(error);
         }
         this.pending.clear();
-        for (const record of this.recordQueue.splice(0))
-            record.reject(error);
+    }
+
+    private recycleWorker(worker: Worker, error: MemoryDatabaseError): void {
+        if (this.worker !== worker)
+            return;
+        this.worker = undefined;
+        this.rejectPending(error);
+        void worker.terminate();
     }
 
     private send(request: MemoryWorkerRequest): Promise<WorkerSuccessResponse> {
         const worker = this.ensureWorker();
         return new Promise<WorkerSuccessResponse>((resolve, reject) => {
             const timer = setTimeout(() => {
-                this.pending.delete(request.requestId);
-                reject(new MemoryDatabaseError('internal', 'The memory worker timed out.'));
+                this.recycleWorker(worker, new MemoryDatabaseError('timeout', 'The memory worker timed out.'));
             }, this.requestTimeoutMs);
             this.pending.set(request.requestId, {
                 resolve,
@@ -442,7 +544,14 @@ export class MemoryDatabase {
                 timer,
                 operation: request.operation
             });
-            worker.postMessage(request);
+            try {
+                worker.postMessage(request);
+            } catch {
+                clearTimeout(timer);
+                this.pending.delete(request.requestId);
+                this.recycleWorker(worker, new MemoryDatabaseError('worker', 'The memory worker stopped unexpectedly.'));
+                reject(new MemoryDatabaseError('worker', 'The memory worker stopped unexpectedly.'));
+            }
         });
     }
 }

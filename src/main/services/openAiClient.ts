@@ -8,6 +8,7 @@ import {
     capturedImageSchema,
     providerConfigSchema,
     type CapturedImage,
+    type MemoryPersistenceStatus,
     type ProviderErrorCode,
     type ProviderConfig
 } from '../../shared/contracts';
@@ -90,6 +91,7 @@ export interface ImageTranslationRequest {
 export interface TranslationResult {
     translatedText: string;
     model: string;
+    memoryStatus?: MemoryPersistenceStatus;
 }
 
 export type TranslationDeltaHandler = (delta: string) => void;
