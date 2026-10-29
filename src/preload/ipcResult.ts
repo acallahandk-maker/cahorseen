@@ -34,6 +34,18 @@ export function parseIpcResult<T>(schema: z.ZodType<T>, raw: unknown): T {
     return parsed.value;
 }
 
+export function parseIpcTaskResult<T>(schema: z.ZodType<T>, raw: unknown): T {
+    const parsed = z.union([
+        successSchema(schema),
+        z.strictObject({
+            ok: z.literal(false),
+            error: ipcErrorSchema,
+            task: schema
+        })
+    ]).parse(raw);
+    return parsed.ok ? parsed.value : parsed.task;
+}
+
 export function parseIpcAck(raw: unknown): void {
     const parsed = z.union([
         z.strictObject({ ok: z.literal(true) }),

@@ -90,10 +90,12 @@ describe('screenshot translation', () => {
         expect(translationTaskSchema.parse(task)).toEqual({
             id: 'screenshot-task',
             status: 'completed',
+            kind: 'screenshot',
             sourceText: 'Screenshot region',
             translatedText: 'translated',
             sourceLanguage: 'und',
             targetLanguage: 'zh-CN',
+            bounds,
             providerId: 'synthetic-provider',
             providerName: 'Synthetic',
             textModel: 'text-model',
@@ -127,6 +129,27 @@ describe('screenshot translation', () => {
         });
         expect(sentImage?.dataUrl).toBe('');
         expect(sentImage?.byteLength).toBe(0);
+    });
+
+    it('returns failed screenshot retry inputs with exact bounds and no retained pixels', async () => {
+        let sentImage: CapturedImage | undefined;
+        const runImage = vi.fn(async (request: ImageTranslationRunnerRequest) => {
+            sentImage = request.image;
+            throw new ProviderError('rate-limited');
+        });
+
+        const task = await service({ runImage }).translateScreenshot(bounds);
+
+        expect(task).toMatchObject({
+            status: 'failed',
+            kind: 'screenshot',
+            bounds,
+            errorCode: 'rate-limited'
+        });
+        expect(sentImage?.dataUrl).toBe('');
+        expect(sentImage?.byteLength).toBe(0);
+        expect(JSON.stringify(task)).not.toContain('data:image');
+        expect(JSON.stringify(task)).not.toContain('synthetic-image');
     });
 
     it('preserves provider error codes and releases the screenshot on failure', async () => {
@@ -447,9 +470,11 @@ describe('screenshot translation', () => {
                 return {
                     id: taskId,
                     status: 'completed',
+                    kind: 'screenshot',
                     sourceText: 'Screenshot region',
                     translatedText: 'translated',
-                    targetLanguage: 'zh-CN'
+                    targetLanguage: 'zh-CN',
+                    bounds
                 };
             })
         };
@@ -522,9 +547,11 @@ describe('screenshot translation', () => {
                     task: {
                         id: expect.any(String),
                         status: 'completed',
+                        kind: 'screenshot',
                         sourceText: 'Screenshot region',
                         translatedText: 'translated',
-                        targetLanguage: 'zh-CN'
+                        targetLanguage: 'zh-CN',
+                        bounds
                     }
                 }
             }
@@ -624,9 +651,11 @@ describe('screenshot translation', () => {
                 return {
                     id: 'overlay-task',
                     status: 'completed',
+                    kind: 'screenshot',
                     sourceText: 'Screenshot region',
                     translatedText: 'translated',
-                    targetLanguage: 'zh-CN'
+                    targetLanguage: 'zh-CN',
+                    bounds
                 };
             })
         };

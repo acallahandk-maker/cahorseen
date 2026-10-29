@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
     IpcClientError,
-    parseIpcResult
+    parseIpcResult,
+    parseIpcTaskResult
 } from '../../src/preload/ipcResult';
 import SettingsWindow, {
     maskSecret,
@@ -13,6 +14,7 @@ import SettingsWindow, {
 } from '../../src/renderer/settings/SettingsWindow';
 import {
     settingsPreferencesSchema,
+    translationTaskSchema,
     type ProviderDetails,
     type ProviderSummary,
     type SettingsPreferences
@@ -75,7 +77,24 @@ const preferences: SettingsPreferences = {
     }
 };
 
-afterEach(cleanup);
+afterEach(() => {
+    cleanup();
+    delete (window as unknown as { desktopPet?: unknown }).desktopPet;
+});
+
+function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (error: unknown) => void;
+} {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+    });
+    return { promise, resolve, reject };
+}
 
 describe('SettingsWindow', () => {
     it('loads provider details before enabling save and destructive actions', async () => {
@@ -346,6 +365,201 @@ describe('SettingsWindow', () => {
         );
     });
 
+    it('serializes concurrent save delete and select mutations', async () => {
+        const user = userEvent.setup();
+        const save = deferred<ProviderSummary>();
+        const remove = deferred<void>();
+        const select = deferred<void>();
+        const onSaveProvider = vi.fn(() => save.promise);
+        const onDeleteProvider = vi.fn(() => remove.promise);
+        const onSelectProvider = vi.fn(() => select.promise);
+        render(
+            <SettingsWindow
+                providers={providers}
+                activeProviderId="provider-a"
+                preferences={preferences}
+                onLoadProviderDetails={vi.fn(async (providerId) => (
+                    providerId === 'provider-a' ? detailsA : detailsB
+                ))}
+                onSaveProvider={onSaveProvider}
+                onDeleteProvider={onDeleteProvider}
+                onSelectProvider={onSelectProvider}
+                onTestProvider={vi.fn()}
+                onSavePreferences={vi.fn()}
+            />
+        );
+        await waitFor(() => expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(false));
+
+        await user.click(screen.getByRole('button', { name: 'Save provider' }));
+        await user.click(screen.getByRole('button', { name: 'Delete provider' }));
+        await user.selectOptions(screen.getByLabelText('Active provider'), 'provider-b');
+
+        expect(onSaveProvider).toHaveBeenCalledTimes(1);
+        expect(onDeleteProvider).not.toHaveBeenCalled();
+        expect(onSelectProvider).not.toHaveBeenCalled();
+        save.resolve(providers[0]);
+        await waitFor(() => expect(onDeleteProvider).toHaveBeenCalledTimes(1));
+        expect(onSelectProvider).not.toHaveBeenCalled();
+        remove.resolve();
+        await waitFor(() => expect(onSelectProvider).toHaveBeenCalledTimes(1));
+        select.resolve();
+        await waitFor(() => expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(false));
+    });
+
+    it('cleans current detail loading across stale success and failure responses', async () => {
+        const user = userEvent.setup();
+        const staleSuccess = deferred<ProviderDetails>();
+        const currentDetails = deferred<ProviderDetails>();
+        const onLoadProviderDetails = vi.fn((providerId: string) => (
+            providerId === 'provider-a' ? staleSuccess.promise : currentDetails.promise
+        ));
+        render(
+            <SettingsWindow
+                providers={providers}
+                activeProviderId="provider-a"
+                preferences={preferences}
+                onLoadProviderDetails={onLoadProviderDetails}
+                onSaveProvider={vi.fn()}
+                onDeleteProvider={vi.fn()}
+                onSelectProvider={vi.fn(async () => undefined)}
+                onTestProvider={vi.fn()}
+                onSavePreferences={vi.fn()}
+            />
+        );
+
+        await user.selectOptions(screen.getByLabelText('Active provider'), 'provider-b');
+        staleSuccess.resolve(detailsA);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(true);
+        currentDetails.resolve(detailsB);
+        await waitFor(() => expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(false));
+
+        cleanup();
+        const staleFailure = deferred<ProviderDetails>();
+        const nextDetails = deferred<ProviderDetails>();
+        render(
+            <SettingsWindow
+                providers={providers}
+                activeProviderId="provider-a"
+                preferences={preferences}
+                onLoadProviderDetails={vi.fn((providerId: string) => (
+                    providerId === 'provider-a' ? staleFailure.promise : nextDetails.promise
+                ))}
+                onSaveProvider={vi.fn()}
+                onDeleteProvider={vi.fn()}
+                onSelectProvider={vi.fn(async () => undefined)}
+                onTestProvider={vi.fn()}
+                onSavePreferences={vi.fn()}
+            />
+        );
+        await user.selectOptions(screen.getByLabelText('Active provider'), 'provider-b');
+        staleFailure.reject(new IpcClientError('timeout', 'Stale timeout.'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(true);
+        nextDetails.resolve(detailsB);
+        await waitFor(() => expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(false));
+        expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('rolls back to the stored active provider and reloads authoritative state', async () => {
+        const user = userEvent.setup();
+        const setActiveProvider = vi.fn(async (providerId: string) => {
+            if (providerId === 'provider-b')
+                throw new IpcClientError('provider-not-found', 'Provider is not configured.');
+        });
+        const getSettings = vi.fn(async () => ({
+            activeProviderId: 'provider-a',
+            preferences
+        }));
+        const getProviderSummaries = vi.fn(async () => providers);
+        (window as unknown as { desktopPet?: unknown }).desktopPet = {
+            getProviderSummaries,
+            getProviderDetails: vi.fn(async (providerId: string) => (
+                providerId === 'provider-a' ? detailsA : detailsB
+            )),
+            getSettings,
+            saveProvider: vi.fn(),
+            deleteProvider: vi.fn(),
+            setActiveProvider,
+            testProvider: vi.fn(),
+            saveSettings: vi.fn()
+        };
+        render(<SettingsWindow />);
+        await waitFor(() => expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(false));
+
+        await user.selectOptions(screen.getByLabelText('Active provider'), 'provider-b');
+        await waitFor(() => expect(setActiveProvider).toHaveBeenNthCalledWith(2, 'provider-a'));
+        await waitFor(() => expect(getSettings.mock.calls.length).toBeGreaterThanOrEqual(2));
+        expect(getProviderSummaries.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(screen.getByLabelText('Active provider')).toHaveProperty('value', 'provider-a');
+        expect(screen.getByLabelText('System prompt')).toHaveProperty(
+            'value',
+            'Stored prompt A'
+        );
+    });
+
+    it('reloads authoritative state and surfaces typed rollback failure', async () => {
+        const user = userEvent.setup();
+        const setActiveProvider = vi.fn(async (providerId: string) => {
+            if (providerId === 'provider-b')
+                throw new IpcClientError('provider-not-found', 'Provider is not configured.');
+            throw new IpcClientError('storage-error', 'Provider storage could not be updated.');
+        });
+        let settingsReads = 0;
+        const getSettings = vi.fn(async () => ({
+            activeProviderId: ++settingsReads <= 2 ? 'provider-a' : 'provider-b',
+            preferences
+        }));
+        const getProviderSummaries = vi.fn(async () => providers);
+        (window as unknown as { desktopPet?: unknown }).desktopPet = {
+            getProviderSummaries,
+            getProviderDetails: vi.fn(async (providerId: string) => (
+                providerId === 'provider-a' ? detailsA : detailsB
+            )),
+            getSettings,
+            saveProvider: vi.fn(),
+            deleteProvider: vi.fn(),
+            setActiveProvider,
+            testProvider: vi.fn(),
+            saveSettings: vi.fn()
+        };
+        render(<SettingsWindow />);
+        await waitFor(() => expect((screen.getByRole('button', {
+            name: 'Save provider'
+        }) as HTMLButtonElement).disabled).toBe(false));
+
+        await user.selectOptions(screen.getByLabelText('Active provider'), 'provider-b');
+        expect(setActiveProvider.mock.calls).toEqual([
+            ['provider-b'],
+            ['provider-a']
+        ]);
+        await waitFor(() => expect(screen.getByRole('alert').getAttribute(
+            'data-error-code'
+        )).toBe('storage-error'));
+        expect(setActiveProvider).toHaveBeenNthCalledWith(2, 'provider-a');
+        expect(getSettings.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(getProviderSummaries.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(screen.getByLabelText('Active provider')).toHaveProperty('value', 'provider-b');
+        expect(screen.getByLabelText('System prompt')).toHaveProperty(
+            'value',
+            'Stored prompt B'
+        );
+    });
+
     it('tests text and vision connections and saves valid preferences', async () => {
         const user = userEvent.setup();
         const onTestProvider = vi.fn(async (providerId: string, capability: 'text' | 'vision') => ({
@@ -425,5 +639,40 @@ describe('SettingsWindow', () => {
         }
         expect(thrown).toBeInstanceOf(IpcClientError);
         expect((thrown as IpcClientError).code).toBe('authentication');
+    });
+
+    it('returns complete failed translation tasks while malformed IPC remains typed', () => {
+        const failedTask = {
+            id: 'failed-task',
+            status: 'failed',
+            kind: 'selection',
+            sourceText: 'exact retry source',
+            translatedText: '',
+            sourceLanguage: 'en',
+            targetLanguage: 'zh-CN',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic Provider',
+            textModel: 'synthetic-text-model',
+            visionModel: 'synthetic-vision-model',
+            translationModel: 'synthetic-text-model',
+            error: 'Provider rate limit exceeded.',
+            errorCode: 'rate-limited'
+        };
+
+        expect(parseIpcTaskResult(translationTaskSchema, {
+            ok: false,
+            error: {
+                code: 'rate-limited',
+                message: 'Provider rate limit exceeded.'
+            },
+            task: failedTask
+        })).toEqual(failedTask);
+        expect(() => parseIpcTaskResult(translationTaskSchema, {
+            ok: false,
+            error: {
+                code: 'rate-limited',
+                message: 'Provider rate limit exceeded.'
+            }
+        })).toThrow();
     });
 });

@@ -492,10 +492,12 @@ export class ScreenshotService {
             return {
                 id: taskId,
                 status: 'completed',
+                kind: 'screenshot',
                 sourceText,
                 translatedText: result.translatedText,
                 sourceLanguage: 'und',
                 targetLanguage,
+                bounds,
                 ...(provider.id === undefined ? {} : { providerId: provider.id }),
                 providerName: provider.name,
                 textModel: provider.textModel,
@@ -506,10 +508,12 @@ export class ScreenshotService {
             return {
                 id: taskId,
                 status: 'failed',
+                kind: 'screenshot',
                 sourceText,
                 translatedText: '',
                 sourceLanguage: 'und',
                 targetLanguage,
+                bounds,
                 ...(provider?.id === undefined ? {} : { providerId: provider.id }),
                 ...(provider === undefined ? {} : {
                     providerName: provider.name,

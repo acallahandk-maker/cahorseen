@@ -30,7 +30,7 @@ import {
     type TranslationEvent,
     type TranslationTask
 } from '../shared/contracts';
-import { parseIpcAck, parseIpcResult } from './ipcResult';
+import { parseIpcAck, parseIpcResult, parseIpcTaskResult } from './ipcResult';
 
 const pingChannel = 'desktop-pet:ping';
 const providerChannels = {
@@ -89,14 +89,14 @@ const desktopPetApi: DesktopPetApi = {
     ),
     translateSelection: async (options) => {
         const request = translationStartSchema.parse(options ?? {});
-        return parseIpcResult(
+        return parseIpcTaskResult(
             translationTaskSchema,
             await ipcRenderer.invoke(translationIpcChannels.translateSelection, request)
         );
     },
     translateScreenshot: async (bounds) => {
         const request = screenshotTranslationStartSchema.parse({ bounds });
-        return parseIpcResult(
+        return parseIpcTaskResult(
             translationTaskSchema,
             await ipcRenderer.invoke(screenshotIpcChannels.translate, request)
         );
@@ -213,7 +213,7 @@ const desktopPetApi: DesktopPetApi = {
     },
     retryTranslation: async (request) => {
         if (request.kind === 'selection') {
-            return parseIpcResult(
+            return parseIpcTaskResult(
                 translationTaskSchema,
                 await ipcRenderer.invoke(
                     translationIpcChannels.translateSelection,
@@ -221,7 +221,7 @@ const desktopPetApi: DesktopPetApi = {
                 )
             );
         }
-        return parseIpcResult(
+        return parseIpcTaskResult(
             translationTaskSchema,
             await ipcRenderer.invoke(screenshotIpcChannels.translate, {
                 bounds: screenBoundsSchema.parse(request.bounds)

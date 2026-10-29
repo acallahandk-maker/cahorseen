@@ -142,6 +142,7 @@ describe('selection translation integration', () => {
             translateSelection: vi.fn(async (): Promise<TranslationTask> => ({
                 id: 'task-1',
                 status: 'completed',
+                kind: 'selection',
                 sourceText: 'selected text',
                 translatedText: 'selected text',
                 targetLanguage: 'zh-CN'
@@ -229,23 +230,92 @@ describe('selection translation integration', () => {
 
         const result = await handlers.get(translationIpcChannels.translateSelection)?.(event, {});
 
-        expect(result).toEqual({
-            ok: false,
-            error: {
-                code: 'clipboard-restore',
-                message: 'The original clipboard could not be restored.'
-            }
+        const failedTask = (result as { value: TranslationTask }).value;
+        expect(failedTask).toMatchObject({
+            status: 'failed',
+            kind: 'selection',
+            sourceText: 'Capturing selected text',
+            errorCode: 'clipboard-restore'
         });
         const startedTaskId = (sends[0] as { taskId: string }).taskId;
         expect(sends).toEqual([
             { type: 'started', taskId: startedTaskId },
             {
                 type: 'failed',
-                taskId: startedTaskId,
+                taskId: failedTask.id,
                 error: {
                     code: 'clipboard-restore',
                     message: 'The original clipboard could not be restored.'
+                },
+                task: failedTask
+            }
+        ]);
+    });
+
+    it('returns a complete failed selection task with exact retry input', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const sends: unknown[] = [];
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const failedTask = {
+            id: 'failed-selection-task',
+            status: 'failed',
+            kind: 'selection',
+            sourceText: 'exact failed selection input',
+            translatedText: '',
+            sourceLanguage: 'en',
+            targetLanguage: 'zh-CN',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic Provider',
+            textModel: 'synthetic-text-model',
+            visionModel: 'synthetic-vision-model',
+            translationModel: 'synthetic-text-model',
+            error: 'Provider rate limit exceeded.',
+            errorCode: 'rate-limited'
+        } as unknown as TranslationTask;
+        const selection: SelectionIpcService = {
+            captureSelectionOnce: vi.fn(),
+            translateSelection: vi.fn(async () => failedTask)
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn()
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+        const event = {
+            sender: {
+                send: (_channel: string, payload: unknown) => {
+                    sends.push(payload);
                 }
+            }
+        };
+
+        const result = await handlers.get(translationIpcChannels.translateSelection)?.(event, {
+            sourceText: 'exact failed selection input'
+        });
+
+        expect(result).toEqual({ ok: true, value: failedTask });
+        expect(sends).toEqual([
+            {
+                type: 'failed',
+                taskId: 'failed-selection-task',
+                error: {
+                    code: 'rate-limited',
+                    message: 'Provider rate limit exceeded.'
+                },
+                task: failedTask
             }
         ]);
     });
@@ -274,6 +344,7 @@ describe('selection translation integration', () => {
                 return {
                     id: taskId,
                     status: 'completed',
+                    kind: 'selection',
                     sourceText: 'selected text',
                     translatedText: 'ok',
                     targetLanguage: 'zh-CN'
@@ -341,6 +412,7 @@ describe('selection translation integration', () => {
             task: {
                 id: 'starting',
                 status: 'pending',
+                kind: 'selection',
                 sourceText: 'Selection translation',
                 translatedText: '',
                 targetLanguage: 'und'
@@ -361,6 +433,7 @@ describe('selection translation integration', () => {
             task: {
                 id: 'older-task',
                 status: 'completed',
+                kind: 'selection',
                 sourceText: 'older selection',
                 translatedText: 'older translation',
                 targetLanguage: 'zh-CN'
@@ -372,6 +445,16 @@ describe('selection translation integration', () => {
             error: {
                 code: 'rate-limited',
                 message: 'Provider rate limit exceeded.'
+            },
+            task: {
+                id: 'older-task',
+                status: 'failed',
+                kind: 'selection',
+                sourceText: 'older selection',
+                translatedText: '',
+                targetLanguage: 'zh-CN',
+                error: 'Provider rate limit exceeded.',
+                errorCode: 'rate-limited'
             }
         });
 
@@ -385,6 +468,7 @@ describe('selection translation integration', () => {
             task: {
                 id: 'newer-task',
                 status: 'completed',
+                kind: 'selection',
                 sourceText: 'newer selection',
                 translatedText: 'newer translation',
                 targetLanguage: 'zh-CN'
@@ -423,6 +507,7 @@ describe('selection translation integration', () => {
                 return {
                     id: taskId,
                     status: 'completed',
+                    kind: 'selection',
                     sourceText: 'repeat repeat repeat',
                     translatedText: '重复',
                     targetLanguage: 'zh-CN'
@@ -463,6 +548,7 @@ describe('selection translation integration', () => {
             value: {
                 id: taskId,
                 status: 'completed',
+                kind: 'selection',
                 sourceText: 'repeat repeat repeat',
                 translatedText: '重复',
                 targetLanguage: 'zh-CN'
@@ -476,6 +562,7 @@ describe('selection translation integration', () => {
                 task: {
                     id: taskId,
                     status: 'completed',
+                    kind: 'selection',
                     sourceText: 'repeat repeat repeat',
                     translatedText: '重复',
                     targetLanguage: 'zh-CN'
@@ -545,12 +632,11 @@ describe('selection translation integration', () => {
         });
         expect(translationAckSchema.parse(cancelResult)).toEqual({ ok: true });
 
-        await expect(translationPromise).resolves.toEqual({
-            ok: false,
-            error: {
-                code: 'aborted',
-                message: 'Provider request was cancelled.'
-            }
+        const cancelledTask = await translationPromise as { value: TranslationTask };
+        expect(cancelledTask.value).toMatchObject({
+            status: 'failed',
+            kind: 'selection',
+            errorCode: 'aborted'
         });
         expect(sends).toEqual([
             {
@@ -559,11 +645,12 @@ describe('selection translation integration', () => {
             },
             {
                 type: 'failed',
-                taskId: startedEvent.taskId,
+                taskId: cancelledTask.value.id,
                 error: {
                     code: 'aborted',
                     message: 'Provider request was cancelled.'
-                }
+                },
+                task: cancelledTask.value
             }
         ]);
     });

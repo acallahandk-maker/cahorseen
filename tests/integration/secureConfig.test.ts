@@ -216,6 +216,23 @@ describe('secure provider configuration', () => {
         });
     });
 
+    it('exposes authoritative active provider state across rollback writes', async () => {
+        const { directory, service } = await createService();
+        await service.saveProvider(providerConfig('rollback-first'));
+        await service.saveProvider(providerConfig('rollback-second'));
+
+        await service.setActiveProvider('rollback-second');
+        await service.setActiveProvider('rollback-first');
+        const restarted = createSecureConfigService({
+            storagePath: join(directory, 'providers.json'),
+            safeStorage: fakeSafeStorage()
+        });
+
+        await expect(restarted.getSettings()).resolves.toMatchObject({
+            activeProviderId: 'rollback-first'
+        });
+    });
+
     it('registers typed provider IPC handlers without leaking rejected payloads', async () => {
         const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
         const ipcMain = {

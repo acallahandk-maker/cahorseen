@@ -234,13 +234,22 @@ export const translationErrorSchema = z.strictObject({
     message: z.string().max(500)
 });
 
+export const screenBoundsSchema = z.strictObject({
+    x: z.number().int(),
+    y: z.number().int(),
+    width: positiveInteger,
+    height: positiveInteger
+});
+
 export const translationTaskSchema = z.strictObject({
     id: nonEmptyString,
     status: translationStatusSchema,
+    kind: z.enum(['selection', 'screenshot']),
     sourceText: nonEmptyString,
     translatedText: z.string(),
     sourceLanguage: nonEmptyString.max(64).optional(),
     targetLanguage: nonEmptyString,
+    bounds: screenBoundsSchema.optional(),
     providerId: nonEmptyString.optional(),
     providerName: nonEmptyString.optional(),
     textModel: nonEmptyString.optional(),
@@ -248,6 +257,21 @@ export const translationTaskSchema = z.strictObject({
     translationModel: nonEmptyString.optional(),
     error: z.string().optional(),
     errorCode: translationErrorCodeSchema.optional()
+}).superRefine((task, context) => {
+    if (task.kind === 'screenshot' && task.bounds === undefined) {
+        context.addIssue({
+            code: 'custom',
+            path: ['bounds'],
+            message: 'Screenshot tasks must preserve capture bounds'
+        });
+    }
+    if (task.kind === 'selection' && task.bounds !== undefined) {
+        context.addIssue({
+            code: 'custom',
+            path: ['bounds'],
+            message: 'Selection tasks must not retain capture bounds'
+        });
+    }
 });
 
 export const translationAckSchema = z.union([
@@ -277,7 +301,8 @@ export const translationEventSchema = z.discriminatedUnion('type', [
     z.strictObject({
         type: z.literal('failed'),
         taskId: nonEmptyString,
-        error: translationErrorSchema
+        error: translationErrorSchema,
+        task: translationTaskSchema
     })
 ]);
 
@@ -338,13 +363,6 @@ export const selectionCaptureSchema = z.strictObject({
     sourceText: nonEmptyString,
     method: z.enum(['accessibility', 'clipboard']),
     clipboardRestored: z.boolean()
-});
-
-export const screenBoundsSchema = z.strictObject({
-    x: z.number().int(),
-    y: z.number().int(),
-    width: positiveInteger,
-    height: positiveInteger
 });
 
 export const screenshotSelectionSchema = z.strictObject({

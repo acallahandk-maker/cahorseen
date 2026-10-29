@@ -63,6 +63,32 @@ function toTranslationError(error: unknown, fallbackMessage: string): Translatio
     return { code: 'request-failed', message: fallbackMessage };
 }
 
+function applyTaskResult(
+    state: TranslationBubbleState,
+    task: TranslationTask
+): TranslationBubbleState {
+    return {
+        task,
+        streamDelta: task.status === 'completed' ? task.translatedText : state.streamDelta
+    };
+}
+
+function applyTaskFailure(
+    state: TranslationBubbleState,
+    error: unknown,
+    fallbackMessage: string
+): TranslationBubbleState {
+    return {
+        task: {
+            ...state.task,
+            status: 'failed',
+            translatedText: state.streamDelta,
+            ...toTranslationError(error, fallbackMessage)
+        },
+        streamDelta: state.streamDelta
+    };
+}
+
 function ScreenshotOverlay(): React.JSX.Element | null {
     const [viewport, setViewport] = useState<ScreenBounds>();
 
@@ -100,6 +126,7 @@ function PetApp(): React.JSX.Element {
         task: {
             id: 'starting',
             status: 'pending',
+            kind: 'selection',
             sourceText: 'Selection translation',
             translatedText: '',
             targetLanguage: 'und'
@@ -108,7 +135,6 @@ function PetApp(): React.JSX.Element {
     });
     const [translationBusy, setTranslationBusy] = useState(false);
     const translationBusyRef = useRef(false);
-    const screenshotBoundsByTaskId = useRef(new Map<string, ScreenBounds>());
     const [mascotEvents, setMascotEvents] = useState<readonly MascotEvent[]>([]);
     const [mascotBatchId, setMascotBatchId] = useState(0);
     const emitMascotEvents = useCallback((events: readonly MascotEvent[]): void => {
@@ -136,6 +162,7 @@ function PetApp(): React.JSX.Element {
                 task: {
                     id: 'starting',
                     status: 'running',
+                    kind: 'selection',
                     sourceText: 'Capturing selected text',
                     translatedText: '',
                     targetLanguage: 'und'
@@ -144,19 +171,12 @@ function PetApp(): React.JSX.Element {
             });
             try {
                 const task = await window.desktopPet.translateSelection();
-                emitMascotEvents(['success']);
-                setTranslation((current) => translationBubbleReducer(current, {
-                    type: 'completed',
-                    task
-                }));
+                emitMascotEvents([task.status === 'completed' ? 'success' : 'error']);
+                setTranslation((current) => applyTaskResult(current, task));
             } catch (caught) {
                 emitMascotEvents(['error']);
                 setTranslation((current) => current.task.id === 'starting'
-                    ? translationBubbleReducer(current, {
-                        type: 'failed',
-                        taskId: 'starting',
-                        error: toTranslationError(caught, 'Selection translation failed.')
-                    })
+                    ? applyTaskFailure(current, caught, 'Selection translation failed.')
                     : current);
             }
         });
@@ -171,6 +191,7 @@ function PetApp(): React.JSX.Element {
                 task: {
                     id: 'screenshot-starting',
                     status: 'running',
+                    kind: 'screenshot',
                     sourceText: 'Screenshot region',
                     translatedText: '',
                     targetLanguage: 'und'
@@ -179,20 +200,12 @@ function PetApp(): React.JSX.Element {
             });
             try {
                 const task = await window.desktopPet.translateScreenshot(bounds);
-                screenshotBoundsByTaskId.current.set(task.id, bounds);
-                emitMascotEvents(['success']);
-                setTranslation((current) => translationBubbleReducer(current, {
-                    type: 'completed',
-                    task
-                }));
+                emitMascotEvents([task.status === 'completed' ? 'success' : 'error']);
+                setTranslation((current) => applyTaskResult(current, task));
             } catch (caught) {
                 emitMascotEvents(['error']);
                 setTranslation((current) => current.task.status === 'running'
-                    ? translationBubbleReducer(current, {
-                        type: 'failed',
-                        taskId: current.task.id,
-                        error: toTranslationError(caught, 'Screenshot translation failed.')
-                    })
+                    ? applyTaskFailure(current, caught, 'Screenshot translation failed.')
                     : current);
             }
         });
@@ -206,6 +219,8 @@ function PetApp(): React.JSX.Element {
                     ...task,
                     id: `${task.id}-retry`,
                     status: 'running',
+                    kind: task.kind,
+                    bounds: task.bounds,
                     translatedText: '',
                     error: undefined,
                     errorCode: undefined
@@ -213,31 +228,23 @@ function PetApp(): React.JSX.Element {
                 streamDelta: ''
             });
             try {
-                const bounds = screenshotBoundsByTaskId.current.get(task.id);
-                const retried = bounds === undefined
+                if (task.kind === 'screenshot' && task.bounds === undefined)
+                    throw new Error('Screenshot retry bounds are missing.');
+                const retried = task.kind === 'selection'
                     ? await window.desktopPet.retryTranslation({
                         kind: 'selection',
                         sourceText: task.sourceText
                     })
                     : await window.desktopPet.retryTranslation({
                         kind: 'screenshot',
-                        bounds
+                        bounds: task.bounds!
                     });
-                if (bounds !== undefined)
-                    screenshotBoundsByTaskId.current.set(retried.id, bounds);
-                emitMascotEvents(['success']);
-                setTranslation((current) => translationBubbleReducer(current, {
-                    type: 'completed',
-                    task: retried
-                }));
+                emitMascotEvents([retried.status === 'completed' ? 'success' : 'error']);
+                setTranslation((current) => applyTaskResult(current, retried));
             } catch (caught) {
                 emitMascotEvents(['error']);
                 setTranslation((current) => current.task.status === 'running'
-                    ? translationBubbleReducer(current, {
-                        type: 'failed',
-                        taskId: current.task.id,
-                        error: toTranslationError(caught, 'Translation retry failed.')
-                    })
+                    ? applyTaskFailure(current, caught, 'Translation retry failed.')
                     : current);
             }
         });

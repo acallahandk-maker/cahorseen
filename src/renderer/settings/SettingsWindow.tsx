@@ -14,6 +14,12 @@ export interface SettingsError {
     message: string;
 }
 
+export interface SettingsStateSnapshot {
+    providers: ProviderSummary[];
+    activeProviderId?: string;
+    preferences: SettingsPreferences;
+}
+
 export interface SettingsWindowProps {
     providers?: ProviderSummary[];
     activeProviderId?: string;
@@ -28,6 +34,7 @@ export interface SettingsWindowProps {
     ) => Promise<ConnectionTestResult> | ConnectionTestResult | void;
     onSavePreferences?: (preferences: SettingsPreferences) => Promise<unknown> | void;
     onLoadProviderDetails?: (providerId: string) => Promise<ProviderDetails>;
+    onReloadState?: () => Promise<SettingsStateSnapshot>;
 }
 
 interface SettingsDesktopPetApi {
@@ -184,7 +191,8 @@ export default function SettingsWindow({
     onSelectProvider,
     onTestProvider,
     onSavePreferences,
-    onLoadProviderDetails
+    onLoadProviderDetails,
+    onReloadState
 }: SettingsWindowProps): React.JSX.Element {
     const desktopPet = getDesktopPetApi();
     const [providers, setProviders] = useState<ProviderSummary[]>(providedProviders ?? []);
@@ -207,6 +215,7 @@ export default function SettingsWindow({
     const detailGeneration = useRef(0);
     const selectionGeneration = useRef(0);
     const initialDetailsRequested = useRef(false);
+    const mutationQueue = useRef<Promise<void>>(Promise.resolve());
 
     useEffect(() => {
         if (providedProviders !== undefined)
@@ -229,13 +238,15 @@ export default function SettingsWindow({
         providerId: string,
         generation: number
     ): Promise<void> => {
+        if (detailGeneration.current !== generation)
+            return;
         const loader = onLoadProviderDetails ?? desktopPet?.getProviderDetails;
         if (loader === undefined)
             throw new Error('Provider details are unavailable.');
         setDetailsLoading(true);
         try {
             const details = await loader(providerId);
-            if (detailGeneration.current !== generation)
+            if (detailGeneration.current !== generation || details.id !== providerId)
                 return;
             setForm((current) => applyProviderDetails(current ?? emptyProviderForm(), details));
             setLoadedProviderId(providerId);
@@ -243,6 +254,54 @@ export default function SettingsWindow({
             if (detailGeneration.current === generation)
                 setDetailsLoading(false);
         }
+    };
+
+    const readStateSnapshot = async (): Promise<SettingsStateSnapshot> => {
+        if (onReloadState !== undefined)
+            return onReloadState();
+        if (desktopPet !== undefined) {
+            const [nextProviders, settings] = await Promise.all([
+                desktopPet.getProviderSummaries(),
+                desktopPet.getSettings()
+            ]);
+            return {
+                providers: nextProviders,
+                activeProviderId: settings.activeProviderId,
+                preferences: settings.preferences
+            };
+        }
+        return { providers, activeProviderId, preferences };
+    };
+
+    const applyStateSnapshot = async (
+        snapshot: SettingsStateSnapshot,
+        generation: number
+    ): Promise<void> => {
+        if (selectionGeneration.current !== generation)
+            return;
+        const nextActive = snapshot.activeProviderId ?? snapshot.providers[0]?.id ?? '';
+        setProviders(snapshot.providers);
+        setActiveProviderId(nextActive);
+        setPreferences(snapshot.preferences);
+        setHotkeyDraft(snapshot.preferences.hotkey);
+        setLoading(false);
+        if (nextActive.length === 0) {
+            ++detailGeneration.current;
+            setForm(undefined);
+            setLoadedProviderId('');
+            setDetailsLoading(false);
+            return;
+        }
+        const detailsGeneration = ++detailGeneration.current;
+        await loadProviderDetails(nextActive, detailsGeneration);
+    };
+
+    const enqueueProviderMutation = async <T,>(
+        operation: () => Promise<T>
+    ): Promise<T> => {
+        const queued = mutationQueue.current.then(operation, operation);
+        mutationQueue.current = queued.then(() => undefined, () => undefined);
+        return queued;
     };
 
     useEffect(() => {
@@ -295,10 +354,13 @@ export default function SettingsWindow({
     const providerActionsDisabled = loading
         || selectionPending
         || detailsLoading
-        || (activeProviderId.length > 0 && loadedProviderId !== activeProviderId);
-    const deleteDisabled = providerActionsDisabled || activeProviderId.length === 0;
+        || form === undefined
+        || loadedProviderId !== (form.id ?? 'new-provider');
+    const deleteDisabled = providerActionsDisabled || form?.id === undefined;
 
     const updateForm = (patch: Partial<ProviderForm>): void => {
+        ++detailGeneration.current;
+        setDetailsLoading(false);
         setForm((current) => ({ ...(current ?? emptyProviderForm()), ...patch }));
     };
 
@@ -314,78 +376,112 @@ export default function SettingsWindow({
     };
 
     const selectProvider = async (providerId: string): Promise<void> => {
-        const previous = {
-            activeProviderId,
-            form,
-            loadedProviderId
-        };
         const selectionId = ++selectionGeneration.current;
-        const generation = ++detailGeneration.current;
+        const detailsGeneration = ++detailGeneration.current;
         setActiveProviderId(providerId);
         setLoadedProviderId('');
         setForm(undefined);
         setSelectionPending(true);
         setError(undefined);
-        try {
-            await (onSelectProvider ?? desktopPet?.setActiveProvider)?.(providerId);
-            await loadProviderDetails(providerId, generation);
-        } catch (caught) {
-            if (selectionGeneration.current !== selectionId)
-                return;
-            detailGeneration.current += 1;
-            selectionGeneration.current += 1;
-            setSelectionPending(false);
-            setActiveProviderId(previous.activeProviderId);
-            setForm(previous.form);
-            setLoadedProviderId(previous.loadedProviderId);
-            setError(toSettingsError(caught));
-        } finally {
-            if (selectionGeneration.current === selectionId)
-                setSelectionPending(false);
-        }
+        await enqueueProviderMutation(async () => {
+            let previousStoredId = activeProviderId;
+            try {
+                const before = await readStateSnapshot();
+                previousStoredId = before.activeProviderId ?? previousStoredId;
+                await (onSelectProvider ?? desktopPet?.setActiveProvider)?.(providerId);
+                await loadProviderDetails(providerId, detailsGeneration);
+            } catch (caught) {
+                let rollbackError: unknown;
+                try {
+                    if (previousStoredId.length > 0)
+                        await (onSelectProvider ?? desktopPet?.setActiveProvider)?.(
+                            previousStoredId
+                        );
+                } catch (rollbackFailure) {
+                    rollbackError = rollbackFailure;
+                }
+                let reloadError: unknown;
+                try {
+                    await applyStateSnapshot(await readStateSnapshot(), selectionId);
+                } catch (reloadFailure) {
+                    reloadError = reloadFailure;
+                }
+                if (selectionGeneration.current === selectionId) {
+                    setError(toSettingsError(
+                        rollbackError ?? reloadError ?? caught
+                    ));
+                }
+            } finally {
+                if (selectionGeneration.current === selectionId)
+                    setSelectionPending(false);
+            }
+        });
     };
 
     const saveProvider = async (): Promise<void> => {
         if (form === undefined || providerActionsDisabled)
             return;
-        try {
-            const config = toProviderSaveConfig(form);
-            const saved = await (onSaveProvider ?? desktopPet?.saveProvider)?.(config);
-            const resolvedId = saved?.id ?? form.id ?? '';
-            setProviders((current) => saved === undefined
-                ? current
-                : [...current.filter((provider) => provider.id !== saved.id), saved]
-                    .sort((left, right) => left.name.localeCompare(right.name)));
-            setForm({ ...form, id: resolvedId, apiKey: '' });
-            setLoadedProviderId(resolvedId);
-            setActiveProviderId(resolvedId);
-            setError(undefined);
-        } catch (caught) {
-            setError(toSettingsError(caught));
-        }
+        const formSnapshot = form;
+        const generation = ++selectionGeneration.current;
+        ++detailGeneration.current;
+        setDetailsLoading(false);
+        await enqueueProviderMutation(async () => {
+            try {
+                const config = toProviderSaveConfig(formSnapshot);
+                const saved = await (onSaveProvider ?? desktopPet?.saveProvider)?.(config);
+                if (selectionGeneration.current !== generation)
+                    return;
+                const resolvedId = saved?.id ?? formSnapshot.id ?? 'new-provider';
+                setProviders((current) => saved === undefined
+                    ? current
+                    : [...current.filter((provider) => provider.id !== saved.id), saved]
+                        .sort((left, right) => left.name.localeCompare(right.name)));
+                setForm({ ...formSnapshot, id: resolvedId, apiKey: '' });
+                setLoadedProviderId(resolvedId);
+                if (activeProviderId.length === 0)
+                    setActiveProviderId(resolvedId);
+                setError(undefined);
+            } catch (caught) {
+                if (selectionGeneration.current === generation)
+                    setError(toSettingsError(caught));
+            }
+        });
     };
 
     const deleteProvider = async (): Promise<void> => {
         if (deleteDisabled)
             return;
-        try {
-            await (onDeleteProvider ?? desktopPet?.deleteProvider)?.(activeProviderId);
-            const next = providers.filter((provider) => provider.id !== activeProviderId);
-            setProviders(next);
-            const nextActive = next[0]?.id ?? '';
-            setActiveProviderId(nextActive);
-            setLoadedProviderId('');
-            setForm(undefined);
-            setError(undefined);
-            if (nextActive.length > 0) {
-                const generation = ++detailGeneration.current;
-                void loadProviderDetails(nextActive, generation).catch(
-                    (caught: unknown) => setError(toSettingsError(caught))
-                );
+        const providerId = form?.id ?? activeProviderId;
+        const generation = ++selectionGeneration.current;
+        ++detailGeneration.current;
+        setDetailsLoading(false);
+        await enqueueProviderMutation(async () => {
+            try {
+                await (onDeleteProvider ?? desktopPet?.deleteProvider)?.(providerId);
+                if (selectionGeneration.current !== generation)
+                    return;
+                const authoritative = onReloadState !== undefined || desktopPet !== undefined;
+                const snapshot = authoritative
+                    ? await readStateSnapshot()
+                    : (() => {
+                        const nextProviders = providers.filter(
+                            (provider) => provider.id !== providerId
+                        );
+                        return {
+                            providers: nextProviders,
+                            activeProviderId: activeProviderId === providerId
+                                ? nextProviders[0]?.id
+                                : activeProviderId,
+                            preferences
+                        };
+                    })();
+                await applyStateSnapshot(snapshot, generation);
+                setError(undefined);
+            } catch (caught) {
+                if (selectionGeneration.current === generation)
+                    setError(toSettingsError(caught));
             }
-        } catch (caught) {
-            setError(toSettingsError(caught));
-        }
+        });
     };
 
     const testProvider = async (capability: 'text' | 'vision'): Promise<void> => {
@@ -393,7 +489,7 @@ export default function SettingsWindow({
             return;
         try {
             const result = await (onTestProvider ?? desktopPet?.testProvider)?.(
-                activeProviderId,
+                form?.id ?? activeProviderId,
                 capability
             );
             if (result !== undefined)

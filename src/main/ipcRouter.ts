@@ -14,6 +14,7 @@ import {
     settingsIpcChannels,
     settingsPreferencesSchema,
     settingsStateSchema,
+    detectSourceLanguage,
     translationCancelSchema,
     translationEventSchema,
     translationIpcChannels,
@@ -187,6 +188,43 @@ function taskFailure(task: TranslationTask): IpcFailure['error'] {
     return {
         code: task.errorCode ?? 'request-failed',
         message: task.error ?? 'Provider request failed.'
+    };
+}
+
+function failedSelectionTask(
+    taskId: string,
+    sourceText: string,
+    error: IpcFailure['error']
+): TranslationTask {
+    return {
+        id: taskId,
+        status: 'failed',
+        kind: 'selection',
+        sourceText,
+        translatedText: '',
+        sourceLanguage: detectSourceLanguage(sourceText),
+        targetLanguage: 'und',
+        error: error.message,
+        errorCode: error.code
+    };
+}
+
+function failedScreenshotTask(
+    taskId: string,
+    bounds: ScreenBounds,
+    error: IpcFailure['error']
+): TranslationTask {
+    return {
+        id: taskId,
+        status: 'failed',
+        kind: 'screenshot',
+        sourceText: 'Screenshot region',
+        translatedText: '',
+        sourceLanguage: 'und',
+        targetLanguage: 'und',
+        bounds,
+        error: error.message,
+        errorCode: error.code
     };
 }
 
@@ -419,21 +457,24 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
                 }
                 const error = taskFailure(task);
-                sendEvent(event, { type: 'failed', taskId, error });
-                return {
-                    ok: false,
-                    error
-                };
+                sendEvent(event, { type: 'failed', taskId: task.id, error, task });
+                return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } catch (error) {
                 const result = controller.signal.aborted
                     ? failure('aborted', providerErrorMessage('aborted'))
                     : safeSelectionFailure(error);
+                const task = failedSelectionTask(
+                    taskId,
+                    parsed.data.sourceText ?? 'Capturing selected text',
+                    result.error
+                );
                 sendEvent(event, {
                     type: 'failed',
                     taskId,
-                    error: result.error
+                    error: result.error,
+                    task
                 });
-                return result;
+                return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } finally {
                 activeTasks.delete(taskId);
             }
@@ -471,21 +512,20 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
                 }
                 const error = taskFailure(task);
-                sendEvent(event, { type: 'failed', taskId, error });
-                return {
-                    ok: false,
-                    error
-                };
+                sendEvent(event, { type: 'failed', taskId: task.id, error, task });
+                return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } catch (error) {
                 const result = controller.signal.aborted
                     ? failure('aborted', providerErrorMessage('aborted'))
                     : safeFailure(error);
+                const task = failedScreenshotTask(taskId, parsed.data.bounds, result.error);
                 sendEvent(event, {
                     type: 'failed',
                     taskId,
-                    error: result.error
+                    error: result.error,
+                    task
                 });
-                return result;
+                return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } finally {
                 activeTasks.delete(taskId);
             }

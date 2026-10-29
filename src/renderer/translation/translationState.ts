@@ -36,14 +36,7 @@ export function translationBubbleReducer(
         case 'failed':
             return event.taskId === state.task.id
                 ? {
-                    task: {
-                        ...state.task,
-                        id: event.taskId,
-                        status: 'failed',
-                        translatedText: state.streamDelta,
-                        error: event.error.message,
-                        errorCode: event.error.code
-                    },
+                    task: event.task,
                     streamDelta: state.streamDelta
                 }
                 : state;

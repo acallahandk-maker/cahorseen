@@ -241,6 +241,74 @@ describe('TranslationBubble', () => {
         }));
     });
 
+    it('retries a pinned failed task with its exact source text', async () => {
+        const user = userEvent.setup();
+        const onRetry = vi.fn();
+        const failedTask: TranslationTask = {
+            ...completedTask,
+            id: 'pinned-failed',
+            status: 'failed',
+            sourceText: 'pinned exact source',
+            translatedText: '',
+            error: 'Provider request failed.',
+            errorCode: 'request-failed'
+        };
+
+        function Harness(): React.JSX.Element {
+            const [task, setTask] = useState(failedTask);
+            return (
+                <>
+                    <button type="button" onClick={() => setTask({
+                        ...completedTask,
+                        id: 'replacement',
+                        sourceText: 'replacement source'
+                    })}>
+                        Replace result
+                    </button>
+                    <TranslationBubble task={task} onRetry={onRetry} />
+                </>
+            );
+        }
+
+        render(<Harness />);
+        await user.click(screen.getByRole('button', { name: 'Pin translation' }));
+        await user.click(screen.getByRole('button', { name: 'Replace result' }));
+        await user.click(screen.getByRole('button', { name: 'Retry translation' }));
+
+        expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({
+            id: 'pinned-failed',
+            sourceText: 'pinned exact source'
+        }));
+    });
+
+    it('retries a failed screenshot task with preserved bounds', async () => {
+        const user = userEvent.setup();
+        const onRetry = vi.fn();
+        const bounds = { x: 12, y: 24, width: 320, height: 180 };
+        render(
+            <TranslationBubble
+                task={{
+                    ...completedTask,
+                    id: 'failed-screenshot',
+                    status: 'failed',
+                    kind: 'screenshot',
+                    sourceText: 'Screenshot region',
+                    translatedText: '',
+                    bounds,
+                    error: 'Provider request failed.',
+                    errorCode: 'request-failed'
+                }}
+                onRetry={onRetry}
+            />
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Retry translation' }));
+        expect(onRetry).toHaveBeenCalledWith(expect.objectContaining({
+            kind: 'screenshot',
+            bounds
+        }));
+    });
+
     it('prevents overlapping retry requests', async () => {
         const user = userEvent.setup();
         let resolveRetry: (() => void) | undefined;

@@ -207,6 +207,7 @@ export class SelectionService {
             return {
                 id: taskId,
                 status: 'completed',
+                kind: 'selection',
                 sourceText,
                 translatedText: result.translatedText,
                 sourceLanguage: detectSourceLanguage(sourceText),
@@ -221,6 +222,7 @@ export class SelectionService {
             return {
                 id: taskId,
                 status: 'failed',
+                kind: 'selection',
                 sourceText,
                 translatedText: '',
                 sourceLanguage: detectSourceLanguage(sourceText),

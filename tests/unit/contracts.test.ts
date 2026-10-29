@@ -72,6 +72,7 @@ describe('shared contracts', () => {
         const task = {
             id: 'task-1',
             status: 'completed',
+            kind: 'selection',
             sourceText: 'hello',
             translatedText: '你好',
             targetLanguage: 'zh-CN'

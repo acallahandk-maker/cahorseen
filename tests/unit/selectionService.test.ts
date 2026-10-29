@@ -164,6 +164,7 @@ describe('selectionService', () => {
         expect(result).toEqual({
             id: 'task-1',
             status: 'failed',
+            kind: 'selection',
             sourceText: 'selected text',
             translatedText: '',
             sourceLanguage: 'en',
@@ -197,6 +198,7 @@ describe('selectionService', () => {
         expect(result).toEqual({
             id: 'task-language',
             status: 'failed',
+            kind: 'selection',
             sourceText: 'selected text',
             translatedText: '',
             sourceLanguage: 'en',
@@ -230,6 +232,7 @@ describe('selectionService', () => {
             task: {
                 id: 'task-bubble',
                 status: 'running',
+                kind: 'selection',
                 sourceText: 'Capturing selected text',
                 translatedText: '',
                 targetLanguage: 'und'
@@ -247,6 +250,7 @@ describe('selectionService', () => {
             task: {
                 id: 'task-bubble',
                 status: 'completed',
+                kind: 'selection',
                 sourceText: 'hello',
                 translatedText: '你好',
                 targetLanguage: 'zh-CN'
