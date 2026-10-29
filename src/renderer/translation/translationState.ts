@@ -1,8 +1,33 @@
-import type { TranslationEvent, TranslationTask } from '../../shared/contracts';
+import type {
+    ScreenBounds,
+    TranslationError,
+    TranslationEvent,
+    TranslationTask
+} from '../../shared/contracts';
 
 export interface TranslationBubbleState {
     task: TranslationTask;
     streamDelta: string;
+}
+
+export type TranslationRetryContext =
+    | { kind: 'selection'; sourceText: string }
+    | { kind: 'screenshot'; bounds: ScreenBounds };
+
+export function createFailedTranslationTask(
+    current: TranslationTask,
+    retry: TranslationRetryContext,
+    error: TranslationError
+): TranslationTask {
+    const taskWithoutBounds = { ...current };
+    delete taskWithoutBounds.bounds;
+    return {
+        ...(retry.kind === 'selection' ? taskWithoutBounds : current),
+        ...retry,
+        status: 'failed',
+        error: error.message,
+        errorCode: error.code
+    };
 }
 
 export function translationBubbleReducer(

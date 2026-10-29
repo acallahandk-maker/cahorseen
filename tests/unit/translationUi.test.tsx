@@ -7,6 +7,7 @@ import TranslationBubble, {
     copyTranslation,
     speakTranslation
 } from '../../src/renderer/translation/TranslationBubble';
+import { createFailedTranslationTask } from '../../src/renderer/translation/translationState';
 import {
     SelectionService,
     type SelectionCaptureAdapter,
@@ -31,6 +32,53 @@ const completedTask: TranslationTask = {
 afterEach(cleanup);
 
 describe('TranslationBubble', () => {
+    it('constructs typed renderer fallback tasks with exact retry context and no image', () => {
+        const runningTask: TranslationTask = {
+            ...completedTask,
+            kind: 'selection',
+            id: 'fallback-running',
+            status: 'running',
+            sourceText: 'placeholder',
+            translatedText: 'partial'
+        };
+        const selectionFailure = createFailedTranslationTask(
+            runningTask,
+            { kind: 'selection', sourceText: 'exact fallback selection' },
+            { code: 'timeout', message: 'Provider request timed out.' }
+        );
+        const screenshotFailure = createFailedTranslationTask(
+            {
+                ...runningTask,
+                kind: 'screenshot',
+                sourceText: 'Screenshot region',
+                bounds: { x: 4, y: 8, width: 640, height: 360 }
+            },
+            {
+                kind: 'screenshot',
+                bounds: { x: 4, y: 8, width: 640, height: 360 }
+            },
+            { code: 'network', message: 'Provider network failed.' }
+        );
+
+        expect(selectionFailure).toMatchObject({
+            status: 'failed',
+            kind: 'selection',
+            sourceText: 'exact fallback selection',
+            translatedText: 'partial',
+            providerId: 'synthetic-provider',
+            error: 'Provider request timed out.',
+            errorCode: 'timeout'
+        });
+        expect(screenshotFailure).toMatchObject({
+            status: 'failed',
+            kind: 'screenshot',
+            bounds: { x: 4, y: 8, width: 640, height: 360 },
+            error: 'Provider network failed.',
+            errorCode: 'network'
+        });
+        expect(JSON.stringify(screenshotFailure)).not.toContain('data:image');
+    });
+
     it('renders production source target provider and model details from the task', () => {
         render(<TranslationBubble task={completedTask} />);
 
@@ -241,18 +289,21 @@ describe('TranslationBubble', () => {
         }));
     });
 
-    it('retries a pinned failed task with its exact source text', async () => {
+    it('retries a pinned renderer fallback failure with its exact source text', async () => {
         const user = userEvent.setup();
         const onRetry = vi.fn();
-        const failedTask: TranslationTask = {
-            ...completedTask,
-            id: 'pinned-failed',
-            status: 'failed',
-            sourceText: 'pinned exact source',
-            translatedText: '',
-            error: 'Provider request failed.',
-            errorCode: 'request-failed'
-        };
+        const failedTask = createFailedTranslationTask(
+            {
+                ...completedTask,
+                kind: 'selection',
+                id: 'pinned-failed',
+                status: 'running',
+                sourceText: 'placeholder',
+                translatedText: ''
+            },
+            { kind: 'selection', sourceText: 'pinned exact source' },
+            { code: 'request-failed', message: 'Provider request failed.' }
+        );
 
         function Harness(): React.JSX.Element {
             const [task, setTask] = useState(failedTask);

@@ -21,6 +21,7 @@ import {
     translationStartSchema,
     type ConnectionTestResult,
     type ProviderDetails,
+    type ProviderConfig,
     type ProviderErrorCode,
     type ProviderSaveConfig,
     type ProviderSummary,
@@ -54,6 +55,7 @@ export interface ProviderIpcService {
     setActiveProvider(providerId: string): Promise<void>;
     getProviderSummaries(): Promise<ProviderSummary[]>;
     getProviderDetails?(providerId: string): Promise<ProviderDetails>;
+    getActiveProviderConfig?(): Promise<ProviderConfig>;
     testProvider(
         providerId: string,
         capability: 'text' | 'vision'
@@ -191,10 +193,34 @@ function taskFailure(task: TranslationTask): IpcFailure['error'] {
     };
 }
 
+type SafeProviderTaskDetails = Pick<
+    TranslationTask,
+    'providerId' | 'providerName' | 'textModel' | 'visionModel'
+>;
+
+async function activeProviderTaskDetails(
+    secureConfig: ProviderIpcService
+): Promise<SafeProviderTaskDetails> {
+    try {
+        const provider = await secureConfig.getActiveProviderConfig?.();
+        return {
+            ...(provider?.id === undefined ? {} : { providerId: provider.id }),
+            ...(provider === undefined ? {} : {
+                providerName: provider.name,
+                textModel: provider.textModel,
+                visionModel: provider.visionModel
+            })
+        };
+    } catch {
+        return {};
+    }
+}
+
 function failedSelectionTask(
     taskId: string,
     sourceText: string,
-    error: IpcFailure['error']
+    error: IpcFailure['error'],
+    providerDetails: SafeProviderTaskDetails
 ): TranslationTask {
     return {
         id: taskId,
@@ -204,6 +230,7 @@ function failedSelectionTask(
         translatedText: '',
         sourceLanguage: detectSourceLanguage(sourceText),
         targetLanguage: 'und',
+        ...providerDetails,
         error: error.message,
         errorCode: error.code
     };
@@ -212,7 +239,8 @@ function failedSelectionTask(
 function failedScreenshotTask(
     taskId: string,
     bounds: ScreenBounds,
-    error: IpcFailure['error']
+    error: IpcFailure['error'],
+    providerDetails: SafeProviderTaskDetails
 ): TranslationTask {
     return {
         id: taskId,
@@ -223,6 +251,7 @@ function failedScreenshotTask(
         sourceLanguage: 'und',
         targetLanguage: 'und',
         bounds,
+        ...providerDetails,
         error: error.message,
         errorCode: error.code
     };
@@ -427,6 +456,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
 
             const controller = new AbortController();
             const taskId = randomUUID();
+            let capturedSourceText = parsed.data.sourceText;
             activeTasks.set(taskId, controller);
             const onTaskId = (startedTaskId: string): void => {
                 if (startedTaskId !== taskId)
@@ -441,7 +471,10 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     taskId,
                     signal: controller.signal,
                     onTaskId,
-                    sourceText: parsed.data.sourceText,
+                    sourceText: capturedSourceText,
+                    onSourceText: (sourceText) => {
+                        capturedSourceText = sourceText;
+                    },
                     onDelta: (delta) => {
                         if (taskId !== undefined) {
                             sendEvent(event, {
@@ -465,8 +498,9 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     : safeSelectionFailure(error);
                 const task = failedSelectionTask(
                     taskId,
-                    parsed.data.sourceText ?? 'Capturing selected text',
-                    result.error
+                    capturedSourceText ?? 'Capturing selected text',
+                    result.error,
+                    await activeProviderTaskDetails(secureConfig)
                 );
                 sendEvent(event, {
                     type: 'failed',
@@ -518,7 +552,12 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 const result = controller.signal.aborted
                     ? failure('aborted', providerErrorMessage('aborted'))
                     : safeFailure(error);
-                const task = failedScreenshotTask(taskId, parsed.data.bounds, result.error);
+                const task = failedScreenshotTask(
+                    taskId,
+                    parsed.data.bounds,
+                    result.error,
+                    await activeProviderTaskDetails(secureConfig)
+                );
                 sendEvent(event, {
                     type: 'failed',
                     taskId,

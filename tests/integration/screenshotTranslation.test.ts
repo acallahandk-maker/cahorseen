@@ -607,6 +607,71 @@ describe('screenshot translation', () => {
         expect(screenshot.translateScreenshot).not.toHaveBeenCalled();
     });
 
+    it('constructs a complete thrown screenshot failure with exact bounds and no image', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const sends: unknown[] = [];
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        const screenshot: ScreenshotIpcService = {
+            translateScreenshot: vi.fn(async (
+                _bounds: ScreenBounds,
+                options?: { taskId?: string; onTaskId?: (taskId: string) => void }
+            ): Promise<TranslationTask> => {
+                options?.onTaskId?.(options.taskId ?? 'thrown-screenshot-task');
+                throw new ProviderError('timeout');
+            })
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn(),
+                getActiveProviderConfig: vi.fn(async () => provider)
+            },
+            screenshot,
+            isSenderAuthorized: () => true
+        });
+        const event = {
+            sender: {
+                send: (_channel: string, payload: unknown) => {
+                    sends.push(payload);
+                }
+            }
+        };
+
+        const result = await handlers.get(screenshotIpcChannels.translate)?.(event, {
+            bounds
+        });
+        const failedTask = (result as { value: TranslationTask }).value;
+
+        expect(failedTask).toMatchObject({
+            status: 'failed',
+            kind: 'screenshot',
+            sourceText: 'Screenshot region',
+            bounds,
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic',
+            textModel: 'text-model',
+            visionModel: 'vision-model',
+            error: 'Provider request timed out.',
+            errorCode: 'timeout'
+        });
+        expect(sends.at(-1)).toMatchObject({
+            type: 'failed',
+            task: failedTask
+        });
+        expect(JSON.stringify(failedTask)).not.toContain('data:image');
+        expect(JSON.stringify(failedTask)).not.toContain('synthetic-image');
+    });
+
     it('opens and closes the virtual-desktop selection surface before capture', async () => {
         const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
         const ipcMain = {

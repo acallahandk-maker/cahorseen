@@ -114,6 +114,45 @@ describe('shared contracts', () => {
         expect(() => quizQuestionSchema.parse({ ...question, options: ['only one'] })).toThrow();
     });
 
+    it('validates complete fallback retry tasks without image payloads', () => {
+        const failedSelection = {
+            id: 'fallback-selection',
+            status: 'failed',
+            kind: 'selection',
+            sourceText: 'exact source',
+            translatedText: '',
+            sourceLanguage: 'en',
+            targetLanguage: 'zh-CN',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic Provider',
+            textModel: 'synthetic-text-model',
+            visionModel: 'synthetic-vision-model',
+            translationModel: 'synthetic-text-model',
+            error: 'Provider request timed out.',
+            errorCode: 'timeout'
+        };
+        const screenshotBounds = { x: 1, y: 2, width: 30, height: 40 };
+        const failedScreenshot = {
+            ...failedSelection,
+            id: 'fallback-screenshot',
+            kind: 'screenshot',
+            sourceText: 'Screenshot region',
+            sourceLanguage: 'und',
+            bounds: screenshotBounds
+        };
+
+        expect(translationTaskSchema.parse(failedSelection)).toEqual(failedSelection);
+        expect(translationTaskSchema.parse(failedScreenshot)).toEqual(failedScreenshot);
+        expect(() => translationTaskSchema.parse({
+            ...failedScreenshot,
+            bounds: undefined
+        })).toThrow();
+        expect(() => translationTaskSchema.parse({
+            ...failedScreenshot,
+            dataUrl: 'data:image/png;base64,synthetic-image'
+        })).toThrow();
+    });
+
     it('validates IPC result and capture contracts', () => {
         expect(connectionTestResultSchema.parse({
             capability: 'text',

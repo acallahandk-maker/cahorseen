@@ -48,6 +48,7 @@ export interface SelectionTranslationOptions {
     targetLanguage?: string;
     context?: string;
     onTaskId?: (taskId: string) => void;
+    onSourceText?: (sourceText: string) => void;
     onDelta?: TranslationDeltaHandler;
 }
 
@@ -173,6 +174,7 @@ export class SelectionService {
                 throw error;
             throw new SelectionError('aborted');
         }
+        options.onSourceText?.(sourceText);
 
         let targetLanguage = 'und';
         let provider: ProviderConfig | undefined;

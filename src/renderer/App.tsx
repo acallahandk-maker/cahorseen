@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
     MascotEvent,
     ScreenBounds,
+    SelectionCapture,
     TranslationError,
     TranslationEvent,
     TranslationTask
@@ -12,13 +13,15 @@ import RegionSelector from './screenshot/RegionSelector';
 import SettingsWindow from './settings/SettingsWindow';
 import TranslationBubble from './translation/TranslationBubble';
 import {
+    createFailedTranslationTask,
     translationBubbleReducer,
-    type TranslationBubbleState
+    type TranslationBubbleState,
+    type TranslationRetryContext
 } from './translation/translationState';
 
 interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
-    captureSelectionOnce: () => Promise<unknown>;
+    captureSelectionOnce: () => Promise<SelectionCapture>;
     translateSelection: (options?: { sourceText?: string }) => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     openSettings: () => Promise<void>;
@@ -76,15 +79,18 @@ function applyTaskResult(
 function applyTaskFailure(
     state: TranslationBubbleState,
     error: unknown,
-    fallbackMessage: string
+    fallbackMessage: string,
+    retry: TranslationRetryContext
 ): TranslationBubbleState {
     return {
-        task: {
-            ...state.task,
-            status: 'failed',
-            translatedText: state.streamDelta,
-            ...toTranslationError(error, fallbackMessage)
-        },
+        task: createFailedTranslationTask(
+            {
+                ...state.task,
+                translatedText: state.streamDelta
+            },
+            retry,
+            toTranslationError(error, fallbackMessage)
+        ),
         streamDelta: state.streamDelta
     };
 }
@@ -157,6 +163,10 @@ function PetApp(): React.JSX.Element {
     }, []);
     const startTranslation = useCallback(async (): Promise<void> => {
         await runTranslationExclusive(async () => {
+            let retry: TranslationRetryContext = {
+                kind: 'selection',
+                sourceText: 'Capturing selected text'
+            };
             emitMascotEvents(['listening', 'thinking']);
             setTranslation({
                 task: {
@@ -170,13 +180,25 @@ function PetApp(): React.JSX.Element {
                 streamDelta: ''
             });
             try {
-                const task = await window.desktopPet.translateSelection();
+                const capture = await window.desktopPet.captureSelectionOnce();
+                retry = {
+                    kind: 'selection',
+                    sourceText: capture.sourceText
+                };
+                const task = await window.desktopPet.translateSelection({
+                    sourceText: capture.sourceText
+                });
                 emitMascotEvents([task.status === 'completed' ? 'success' : 'error']);
                 setTranslation((current) => applyTaskResult(current, task));
             } catch (caught) {
                 emitMascotEvents(['error']);
                 setTranslation((current) => current.task.id === 'starting'
-                    ? applyTaskFailure(current, caught, 'Selection translation failed.')
+                    ? applyTaskFailure(
+                        current,
+                        caught,
+                        'Selection translation failed.',
+                        retry
+                    )
                     : current);
             }
         });
@@ -205,7 +227,12 @@ function PetApp(): React.JSX.Element {
             } catch (caught) {
                 emitMascotEvents(['error']);
                 setTranslation((current) => current.task.status === 'running'
-                    ? applyTaskFailure(current, caught, 'Screenshot translation failed.')
+                    ? applyTaskFailure(
+                        current,
+                        caught,
+                        'Screenshot translation failed.',
+                        { kind: 'screenshot', bounds }
+                    )
                     : current);
             }
         });
@@ -244,7 +271,20 @@ function PetApp(): React.JSX.Element {
             } catch (caught) {
                 emitMascotEvents(['error']);
                 setTranslation((current) => current.task.status === 'running'
-                    ? applyTaskFailure(current, caught, 'Translation retry failed.')
+                    ? applyTaskFailure(
+                        current,
+                        caught,
+                        'Translation retry failed.',
+                        task.kind === 'selection'
+                            ? {
+                                kind: 'selection',
+                                sourceText: task.sourceText
+                            }
+                            : {
+                                kind: 'screenshot',
+                                bounds: task.bounds!
+                            }
+                    )
                     : current);
             }
         });

@@ -187,7 +187,7 @@ describe('selection translation integration', () => {
         expect(messages.join('')).toBe('a'.repeat(4_501));
     });
 
-    it('emits terminal failure events after capture starts', async () => {
+    it('returns exact selected text and safe details for thrown selection failures', async () => {
         const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
         const sends: unknown[] = [];
         const ipcMain = {
@@ -204,8 +204,10 @@ describe('selection translation integration', () => {
                 signal?: AbortSignal;
                 taskId?: string;
                 onTaskId?: (taskId: string) => void;
+                onSourceText?: (sourceText: string) => void;
             }): Promise<TranslationTask> => {
                 options?.onTaskId?.(options.taskId ?? 'terminal-failure-task');
+                options?.onSourceText?.('exact thrown selection text');
                 throw new SelectionError('clipboard-restore');
             })
         };
@@ -215,7 +217,8 @@ describe('selection translation integration', () => {
                 saveProvider: vi.fn(),
                 setActiveProvider: vi.fn(),
                 getProviderSummaries: vi.fn(async () => []),
-                testProvider: vi.fn()
+                testProvider: vi.fn(),
+                getActiveProviderConfig: vi.fn(async () => provider)
             },
             selection,
             isSenderAuthorized: () => true
@@ -234,9 +237,15 @@ describe('selection translation integration', () => {
         expect(failedTask).toMatchObject({
             status: 'failed',
             kind: 'selection',
-            sourceText: 'Capturing selected text',
+            sourceText: 'exact thrown selection text',
+            providerId: 'synthetic-provider',
+            providerName: 'Synthetic Provider',
+            textModel: 'synthetic-text-model',
+            visionModel: 'synthetic-vision-model',
+            error: 'The original clipboard could not be restored.',
             errorCode: 'clipboard-restore'
         });
+        expect(JSON.stringify(failedTask)).not.toContain(SYNTHETIC_API_KEY);
         const startedTaskId = (sends[0] as { taskId: string }).taskId;
         expect(sends).toEqual([
             { type: 'started', taskId: startedTaskId },

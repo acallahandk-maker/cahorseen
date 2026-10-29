@@ -21,6 +21,7 @@ import {
 } from './selectionShortcut';
 import { runSmokeModeIfEnabled } from './smokeMode';
 import {
+    getActiveProviderConfig,
     getProviderSummaries,
     getProviderDetails,
     deleteProvider,
@@ -123,6 +124,7 @@ app.whenReady().then(() => {
         secureConfig: {
             deleteProvider,
             getSettings,
+            getActiveProviderConfig,
             getProviderDetails,
             saveProvider,
             saveSettings,
