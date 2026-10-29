@@ -84,6 +84,36 @@ function isAbortError(error: unknown): boolean {
     );
 }
 
+function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal === undefined)
+        return operation;
+    return new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const finish = (callback: () => void): void => {
+            if (settled)
+                return;
+            settled = true;
+            signal.removeEventListener('abort', abort);
+            callback();
+        };
+        const abort = (): void => {
+            finish(() => reject(new SelectionError('aborted')));
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        operation.then(
+            (value) => finish(() => resolve(value)),
+            (error) => finish(() => reject(error))
+        );
+        if (signal.aborted)
+            abort();
+    });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted === true)
+        throw new SelectionError('aborted');
+}
+
 function normalizeSelection(value: string): string {
     const sourceText = value.trim();
     if (sourceText.length === 0)
@@ -141,8 +171,9 @@ export class SelectionService {
 
         try {
             const sourceText = normalizeSelection(
-                await this.captureAdapter.readAccessibilitySelection(signal)
+                await abortable(this.captureAdapter.readAccessibilitySelection(signal), signal)
             );
+            throwIfAborted(signal);
             return {
                 sourceText,
                 method: 'accessibility',
@@ -251,23 +282,70 @@ export class SelectionService {
 
         let capture: SelectionCapture | undefined;
         let captureError: unknown;
+        let copySettled = false;
+        let readStarted = false;
+        let readSettled = false;
+        let readOperationPromise: Promise<string> | undefined;
+        let restoreQueue: Promise<void> = Promise.resolve();
+        const restoreClipboard = (): Promise<void> => {
+            const next = restoreQueue.then(async () => {
+                await this.captureAdapter.restoreClipboard(snapshot);
+            });
+            restoreQueue = next.catch(() => undefined);
+            return next;
+        };
+        const copyOperation = Promise.resolve()
+            .then(() => this.captureAdapter.copySelectionToClipboard(signal))
+            .then(() => {
+                copySettled = true;
+            }, (error) => {
+                copySettled = true;
+                throw error;
+            });
+        const startReadOperation = (): Promise<string> => {
+            readStarted = true;
+            readOperationPromise = Promise.resolve()
+                .then(() => this.captureAdapter.readClipboardText(signal))
+                .then((value) => {
+                    readSettled = true;
+                    return value;
+                }, (error) => {
+                    readSettled = true;
+                    throw error;
+                });
+            return readOperationPromise;
+        };
         try {
-            await this.captureAdapter.copySelectionToClipboard(signal);
+            await abortable(copyOperation, signal);
+            throwIfAborted(signal);
             capture = {
-                sourceText: normalizeSelection(await this.captureAdapter.readClipboardText(signal)),
+                sourceText: normalizeSelection(await abortable(startReadOperation(), signal)),
                 method: 'clipboard',
                 clipboardRestored: true
             };
+            throwIfAborted(signal);
         } catch (error) {
             captureError = error;
         }
 
+        let restoreError: unknown;
         try {
-            await this.captureAdapter.restoreClipboard(snapshot);
-        } catch {
-            throw new SelectionError('clipboard-restore');
+            await restoreClipboard();
+        } catch (error) {
+            restoreError = error;
         }
 
+        if (signal?.aborted === true && (!copySettled || !readSettled)) {
+            const pendingOperations: Promise<unknown>[] = [
+                copySettled ? Promise.resolve() : copyOperation
+            ];
+            if (readStarted && !readSettled && readOperationPromise !== undefined)
+                pendingOperations.push(readOperationPromise);
+            void Promise.allSettled(pendingOperations)
+                .then(() => restoreClipboard().catch(() => undefined));
+        }
+        if (restoreError !== undefined)
+            throw new SelectionError('clipboard-restore');
         if (capture !== undefined)
             return capture;
         if (isAbortError(captureError) || signal?.aborted === true)

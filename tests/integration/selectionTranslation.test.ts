@@ -6,6 +6,7 @@ import {
     translationEventSchema,
     translationIpcChannels,
     translationAckSchema,
+    translationTaskSchema,
     type ProviderConfig,
     type SelectionCapture,
     type TranslationTask
@@ -662,6 +663,181 @@ describe('selection translation integration', () => {
                 task: cancelledTask.value
             }
         ]);
+    });
+
+    it('cancels pending accessibility capture with a complete terminal failure', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const sends: unknown[] = [];
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        let rejectCapture: ((error: unknown) => void) | undefined;
+        const selection: SelectionIpcService = {
+            captureSelectionOnce: vi.fn(() => new Promise<SelectionCapture>(
+                (_resolve, reject) => {
+                    rejectCapture = reject;
+                }
+            )),
+            translateSelection: vi.fn()
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn(),
+                getActiveProviderConfig: vi.fn(async () => provider)
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+        const event = {
+            sender: {
+                send: (_channel: string, payload: unknown) => {
+                    sends.push(payload);
+                }
+            }
+        };
+
+        const capturePromise = handlers.get(translationIpcChannels.captureSelection)?.(event, {
+            taskId: 'pending-accessibility-task'
+        });
+        await vi.waitFor(() => {
+            expect(selection.captureSelectionOnce).toHaveBeenCalledTimes(1);
+        });
+        expect(sends).toEqual([{
+            type: 'started',
+            taskId: 'pending-accessibility-task'
+        }]);
+
+        const cancelResult = await handlers.get(translationIpcChannels.cancel)?.(event, {
+            taskId: 'pending-accessibility-task'
+        });
+        rejectCapture?.(new DOMException('cancelled', 'AbortError'));
+
+        expect(translationAckSchema.parse(cancelResult)).toEqual({ ok: true });
+        await expect(capturePromise).resolves.toEqual({
+            ok: false,
+            error: {
+                code: 'aborted',
+                message: 'Provider request was cancelled.'
+            }
+        });
+        const failedEvent = sends[1] as {
+            type: 'failed';
+            taskId: string;
+            error: { code: string; message: string };
+            task: TranslationTask;
+        };
+        expect(failedEvent.type).toBe('failed');
+        expect(failedEvent.taskId).toBe('pending-accessibility-task');
+        expect(translationTaskSchema.parse(failedEvent.task)).toMatchObject({
+            id: 'pending-accessibility-task',
+            status: 'failed',
+            kind: 'selection',
+            sourceText: 'Capturing selected text',
+            errorCode: 'aborted'
+        });
+        expect(selection.translateSelection).not.toHaveBeenCalled();
+    });
+
+    it('ignores stale capture completion and translation after cancellation', async () => {
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const sends: unknown[] = [];
+        const ipcMain = {
+            handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
+                handlers.set(channel, handler);
+            },
+            removeHandler: (channel: string) => {
+                handlers.delete(channel);
+            }
+        };
+        let resolveCapture: ((capture: SelectionCapture) => void) | undefined;
+        const selection: SelectionIpcService = {
+            captureSelectionOnce: vi.fn(() => new Promise<SelectionCapture>((resolve) => {
+                resolveCapture = resolve;
+            })),
+            translateSelection: vi.fn(async (): Promise<TranslationTask> => ({
+                id: 'stale-capture-task',
+                status: 'completed',
+                kind: 'selection',
+                sourceText: 'exact stale selected text',
+                translatedText: 'stale success',
+                targetLanguage: 'zh-CN'
+            }))
+        };
+        registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: vi.fn(),
+                setActiveProvider: vi.fn(),
+                getProviderSummaries: vi.fn(async () => []),
+                testProvider: vi.fn(),
+                getActiveProviderConfig: vi.fn(async () => provider)
+            },
+            selection,
+            isSenderAuthorized: () => true
+        });
+        const event = {
+            sender: {
+                send: (_channel: string, payload: unknown) => {
+                    sends.push(payload);
+                }
+            }
+        };
+
+        const capturePromise = handlers.get(translationIpcChannels.captureSelection)?.(event, {
+            taskId: 'stale-capture-task'
+        });
+        await vi.waitFor(() => {
+            expect(selection.captureSelectionOnce).toHaveBeenCalledTimes(1);
+        });
+        await handlers.get(translationIpcChannels.cancel)?.(event, {
+            taskId: 'stale-capture-task'
+        });
+        resolveCapture?.({
+            sourceText: 'exact stale selected text',
+            method: 'accessibility',
+            clipboardRestored: true
+        });
+
+        await expect(capturePromise).resolves.toEqual({
+            ok: false,
+            error: {
+                code: 'aborted',
+                message: 'Provider request was cancelled.'
+            }
+        });
+        const staleTranslation = await handlers.get(translationIpcChannels.translateSelection)?.(event, {
+            taskId: 'stale-capture-task',
+            sourceText: 'exact stale selected text'
+        });
+        expect(staleTranslation).toMatchObject({
+            ok: true,
+            value: {
+                id: 'stale-capture-task',
+                status: 'failed',
+                kind: 'selection',
+                errorCode: 'aborted'
+            }
+        });
+        expect(selection.translateSelection).not.toHaveBeenCalled();
+        expect(sends.filter((payload) => (
+            typeof payload === 'object'
+            && payload !== null
+            && (payload as { type?: unknown }).type === 'completed'
+        ))).toEqual([]);
+        expect(sends.filter((payload) => (
+            typeof payload === 'object'
+            && payload !== null
+            && (payload as { type?: unknown }).type === 'failed'
+        ))).toHaveLength(1);
     });
 
     it('keeps selection capture and translation failure paths free of secrets', async () => {

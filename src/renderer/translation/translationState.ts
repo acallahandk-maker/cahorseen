@@ -14,6 +14,13 @@ export type TranslationRetryContext =
     | { kind: 'selection'; sourceText: string }
     | { kind: 'screenshot'; bounds: ScreenBounds };
 
+export function isSelectionCaptureRetry(task: TranslationTask): boolean {
+    return task.kind === 'selection'
+        && task.status === 'failed'
+        && task.errorCode === 'aborted'
+        && task.sourceText === 'Capturing selected text';
+}
+
 export function createFailedTranslationTask(
     current: TranslationTask,
     retry: TranslationRetryContext,
@@ -45,21 +52,21 @@ export function translationBubbleReducer(
                 }
             };
         case 'delta':
-            return event.taskId === state.task.id
+            return event.taskId === state.task.id && state.task.status === 'running'
                 ? {
                     ...state,
                     streamDelta: state.streamDelta + event.delta
                 }
                 : state;
         case 'completed':
-            return event.task.id === state.task.id
+            return event.task.id === state.task.id && state.task.status === 'running'
                 ? {
                     task: event.task,
                     streamDelta: event.task.translatedText
                 }
                 : state;
         case 'failed':
-            return event.taskId === state.task.id
+            return event.taskId === state.task.id && state.task.status === 'running'
                 ? {
                     task: event.task,
                     streamDelta: state.streamDelta

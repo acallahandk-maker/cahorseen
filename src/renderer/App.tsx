@@ -14,6 +14,7 @@ import SettingsWindow from './settings/SettingsWindow';
 import TranslationBubble from './translation/TranslationBubble';
 import {
     createFailedTranslationTask,
+    isSelectionCaptureRetry,
     translationBubbleReducer,
     type TranslationBubbleState,
     type TranslationRetryContext
@@ -21,8 +22,11 @@ import {
 
 interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
-    captureSelectionOnce: () => Promise<SelectionCapture>;
-    translateSelection: (options?: { sourceText?: string }) => Promise<TranslationTask>;
+    captureSelectionOnce: (taskId: string) => Promise<SelectionCapture>;
+    translateSelection: (options?: {
+        taskId?: string;
+        sourceText?: string;
+    }) => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     openSettings: () => Promise<void>;
     copyTranslation: (text: string) => Promise<void>;
@@ -141,6 +145,9 @@ function PetApp(): React.JSX.Element {
     });
     const [translationBusy, setTranslationBusy] = useState(false);
     const translationBusyRef = useRef(false);
+    const translationRef = useRef(translation);
+    translationRef.current = translation;
+    const cancelledTaskIdsRef = useRef(new Set<string>());
     const [mascotEvents, setMascotEvents] = useState<readonly MascotEvent[]>([]);
     const [mascotBatchId, setMascotBatchId] = useState(0);
     const emitMascotEvents = useCallback((events: readonly MascotEvent[]): void => {
@@ -161,48 +168,66 @@ function PetApp(): React.JSX.Element {
             setTranslationBusy(false);
         }
     }, []);
-    const startTranslation = useCallback(async (): Promise<void> => {
-        await runTranslationExclusive(async () => {
-            let retry: TranslationRetryContext = {
+    const runSelectionTranslation = useCallback(async (): Promise<void> => {
+        const taskId = globalThis.crypto?.randomUUID?.()
+            ?? `selection-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        let retry: TranslationRetryContext = {
+            kind: 'selection',
+            sourceText: 'Capturing selected text'
+        };
+        emitMascotEvents(['listening', 'thinking']);
+        setTranslation({
+            task: {
+                id: taskId,
+                status: 'running',
                 kind: 'selection',
-                sourceText: 'Capturing selected text'
-            };
-            emitMascotEvents(['listening', 'thinking']);
-            setTranslation({
-                task: {
-                    id: 'starting',
-                    status: 'running',
-                    kind: 'selection',
-                    sourceText: 'Capturing selected text',
-                    translatedText: '',
-                    targetLanguage: 'und'
-                },
-                streamDelta: ''
-            });
-            try {
-                const capture = await window.desktopPet.captureSelectionOnce();
-                retry = {
-                    kind: 'selection',
-                    sourceText: capture.sourceText
-                };
-                const task = await window.desktopPet.translateSelection({
-                    sourceText: capture.sourceText
-                });
-                emitMascotEvents([task.status === 'completed' ? 'success' : 'error']);
-                setTranslation((current) => applyTaskResult(current, task));
-            } catch (caught) {
-                emitMascotEvents(['error']);
-                setTranslation((current) => current.task.id === 'starting'
-                    ? applyTaskFailure(
-                        current,
-                        caught,
-                        'Selection translation failed.',
-                        retry
-                    )
-                    : current);
-            }
+                sourceText: 'Capturing selected text',
+                translatedText: '',
+                targetLanguage: 'und'
+            },
+            streamDelta: ''
         });
-    }, [emitMascotEvents, runTranslationExclusive]);
+        try {
+            const capture = await window.desktopPet.captureSelectionOnce(taskId);
+            if (
+                cancelledTaskIdsRef.current.has(taskId)
+                || translationRef.current.task.id !== taskId
+                || translationRef.current.task.status !== 'running'
+            )
+                return;
+            retry = {
+                kind: 'selection',
+                sourceText: capture.sourceText
+            };
+            const task = await window.desktopPet.translateSelection({
+                taskId,
+                sourceText: capture.sourceText
+            });
+            if (
+                cancelledTaskIdsRef.current.has(taskId)
+                || translationRef.current.task.id !== taskId
+                || translationRef.current.task.status !== 'running'
+            )
+                return;
+            emitMascotEvents([task.status === 'completed' ? 'success' : 'error']);
+            setTranslation((current) => applyTaskResult(current, task));
+        } catch (caught) {
+            if (cancelledTaskIdsRef.current.has(taskId))
+                return;
+            emitMascotEvents(['error']);
+            setTranslation((current) => current.task.id === taskId
+                ? applyTaskFailure(
+                    current,
+                    caught,
+                    'Selection translation failed.',
+                    retry
+                )
+                : current);
+        }
+    }, [emitMascotEvents]);
+    const startTranslation = useCallback(async (): Promise<void> => {
+        await runTranslationExclusive(runSelectionTranslation);
+    }, [runSelectionTranslation, runTranslationExclusive]);
 
     const startScreenshotTranslation = useCallback(async (
         bounds: ScreenBounds
@@ -239,6 +264,10 @@ function PetApp(): React.JSX.Element {
     }, [emitMascotEvents, runTranslationExclusive]);
 
     const retryTranslation = useCallback(async (task: TranslationTask): Promise<void> => {
+        if (isSelectionCaptureRetry(task)) {
+            await runTranslationExclusive(runSelectionTranslation);
+            return;
+        }
         await runTranslationExclusive(async () => {
             emitMascotEvents(['listening', 'thinking']);
             setTranslation({
@@ -288,7 +317,7 @@ function PetApp(): React.JSX.Element {
                     : current);
             }
         });
-    }, [emitMascotEvents, runTranslationExclusive]);
+    }, [emitMascotEvents, runSelectionTranslation, runTranslationExclusive]);
 
     const openScreenshotSelection = useCallback((): void => {
         void window.desktopPet.openScreenshotSelection().catch(() => undefined);
@@ -339,7 +368,10 @@ function PetApp(): React.JSX.Element {
                     onCopy={(text) => void window.desktopPet.copyTranslation(text)}
                     onSpeak={(text) => window.desktopPet.speakTranslation(text)}
                     onRetry={retryTranslation}
-                    onCancel={(taskId) => void window.desktopPet.cancelTranslation(taskId)}
+                    onCancel={(taskId) => {
+                        cancelledTaskIdsRef.current.add(taskId);
+                        void window.desktopPet.cancelTranslation(taskId).catch(() => undefined);
+                    }}
                 />
             </main>
         </PetWindow>

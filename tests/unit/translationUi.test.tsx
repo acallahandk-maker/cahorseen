@@ -7,7 +7,12 @@ import TranslationBubble, {
     copyTranslation,
     speakTranslation
 } from '../../src/renderer/translation/TranslationBubble';
-import { createFailedTranslationTask } from '../../src/renderer/translation/translationState';
+import {
+    createFailedTranslationTask,
+    isSelectionCaptureRetry,
+    translationBubbleReducer,
+    type TranslationBubbleState
+} from '../../src/renderer/translation/translationState';
 import {
     SelectionService,
     type SelectionCaptureAdapter,
@@ -32,6 +37,66 @@ const completedTask: TranslationTask = {
 afterEach(cleanup);
 
 describe('TranslationBubble', () => {
+    it('uses recapture only for cancelled selection capture retry input', () => {
+        expect(isSelectionCaptureRetry({
+            ...completedTask,
+            kind: 'selection',
+            status: 'failed',
+            sourceText: 'Capturing selected text',
+            error: 'Provider request was cancelled.',
+            errorCode: 'aborted'
+        })).toBe(true);
+        expect(isSelectionCaptureRetry({
+            ...completedTask,
+            kind: 'selection',
+            status: 'failed',
+            sourceText: 'exact safe retry input',
+            error: 'Provider request was cancelled.',
+            errorCode: 'aborted'
+        })).toBe(false);
+    });
+
+    it('ignores stale capture completion after cancellation', () => {
+        const runningState: TranslationBubbleState = {
+            task: {
+                ...completedTask,
+                id: 'cancelled-capture',
+                status: 'running',
+                sourceText: 'Capturing selected text',
+                translatedText: ''
+            },
+            streamDelta: ''
+        };
+        const cancelledState = translationBubbleReducer(runningState, {
+            type: 'failed',
+            taskId: 'cancelled-capture',
+            error: {
+                code: 'aborted',
+                message: 'Provider request was cancelled.'
+            },
+            task: {
+                ...runningState.task,
+                status: 'failed',
+                error: 'Provider request was cancelled.',
+                errorCode: 'aborted'
+            }
+        });
+
+        const staleState = translationBubbleReducer(cancelledState, {
+            type: 'completed',
+            task: {
+                ...runningState.task,
+                sourceText: 'exact stale selected text',
+                translatedText: 'stale success',
+                status: 'completed'
+            }
+        });
+
+        expect(staleState).toBe(cancelledState);
+        expect(staleState.task.status).toBe('failed');
+        expect(staleState.task.errorCode).toBe('aborted');
+    });
+
     it('constructs typed renderer fallback tasks with exact retry context and no image', () => {
         const runningTask: TranslationTask = {
             ...completedTask,

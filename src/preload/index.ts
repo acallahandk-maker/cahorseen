@@ -6,6 +6,7 @@ import {
     providerDeleteSchema,
     providerSaveConfigSchema,
     providerSummarySchema,
+    selectionCaptureStartSchema,
     selectionCaptureSchema,
     screenBoundsSchema,
     screenshotIpcChannels,
@@ -47,8 +48,11 @@ const pingResponseSchema = z.object({
 
 export interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
-    captureSelectionOnce: () => Promise<SelectionCapture>;
-    translateSelection: (options?: { sourceText?: string }) => Promise<TranslationTask>;
+    captureSelectionOnce: (taskId: string) => Promise<SelectionCapture>;
+    translateSelection: (options?: {
+        taskId?: string;
+        sourceText?: string;
+    }) => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     saveProvider: (provider: ProviderSaveConfig) => Promise<ProviderSummary>;
     deleteProvider: (providerId: string) => Promise<void>;
@@ -83,10 +87,13 @@ export interface DesktopPetApi {
 
 const desktopPetApi: DesktopPetApi = {
     ping: async () => pingResponseSchema.parse(await ipcRenderer.invoke(pingChannel)),
-    captureSelectionOnce: async () => parseIpcResult(
-        selectionCaptureSchema,
-        await ipcRenderer.invoke(translationIpcChannels.captureSelection)
-    ),
+    captureSelectionOnce: async (taskId) => {
+        const request = selectionCaptureStartSchema.parse({ taskId });
+        return parseIpcResult(
+            selectionCaptureSchema,
+            await ipcRenderer.invoke(translationIpcChannels.captureSelection, request)
+        );
+    },
     translateSelection: async (options) => {
         const request = translationStartSchema.parse(options ?? {});
         return parseIpcTaskResult(

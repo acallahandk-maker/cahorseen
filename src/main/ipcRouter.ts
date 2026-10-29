@@ -11,6 +11,7 @@ import {
     providerSummarySchema,
     screenshotIpcChannels,
     screenshotTranslationStartSchema,
+    selectionCaptureStartSchema,
     settingsIpcChannels,
     settingsPreferencesSchema,
     settingsStateSchema,
@@ -106,6 +107,18 @@ type IpcSuccess<T> = {
 type IpcSaveSuccess = {
     ok: true;
 };
+
+interface ActiveTaskRecord {
+    controller: AbortController;
+    event: unknown;
+    taskId: string;
+    kind: 'selection' | 'screenshot';
+    sourceText?: string;
+    bounds?: ScreenBounds;
+    cancelled: boolean;
+    terminalSent: boolean;
+    cancelledTask?: TranslationTask;
+}
 
 const testPayloadSchema = z.strictObject({
     providerId: z.string().min(1),
@@ -260,7 +273,64 @@ function failedScreenshotTask(
 export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void {
     const { ipcMain, secureConfig, selection, screenshot } = options;
     const isSenderAuthorized = options.isSenderAuthorized ?? defaultIsSenderAuthorized;
-    const activeTasks = new Map<string, AbortController>();
+    const activeTasks = new Map<string, ActiveTaskRecord>();
+    const createActiveTask = (
+        taskId: string,
+        event: unknown,
+        kind: ActiveTaskRecord['kind'],
+        details?: Pick<ActiveTaskRecord, 'sourceText' | 'bounds'>
+    ): ActiveTaskRecord => {
+        const record: ActiveTaskRecord = {
+            controller: new AbortController(),
+            event,
+            taskId,
+            kind,
+            ...details,
+            cancelled: false,
+            terminalSent: false
+        };
+        activeTasks.set(taskId, record);
+        return record;
+    };
+    const sendStarted = (record: ActiveTaskRecord): void => {
+        if (record.terminalSent)
+            return;
+        sendEvent(record.event, {
+            type: 'started',
+            taskId: record.taskId
+        });
+    };
+    const cancelActiveTask = async (record: ActiveTaskRecord): Promise<TranslationTask> => {
+        record.cancelled = true;
+        record.controller.abort();
+        if (record.cancelledTask === undefined) {
+            const error = failure('aborted', providerErrorMessage('aborted')).error;
+            const providerDetails = await activeProviderTaskDetails(secureConfig);
+            record.cancelledTask = record.kind === 'selection'
+                ? failedSelectionTask(
+                    record.taskId,
+                    record.sourceText ?? 'Capturing selected text',
+                    error,
+                    providerDetails
+                )
+                : failedScreenshotTask(
+                    record.taskId,
+                    record.bounds ?? { x: 0, y: 0, width: 1, height: 1 },
+                    error,
+                    providerDetails
+                );
+        }
+        if (!record.terminalSent) {
+            record.terminalSent = true;
+            sendEvent(record.event, {
+                type: 'failed',
+                taskId: record.taskId,
+                error: taskFailure(record.cancelledTask),
+                task: record.cancelledTask
+            });
+        }
+        return record.cancelledTask;
+    };
 
     ipcMain.handle(providerIpcChannels.save, async (event, payload) => {
         if (!isSenderAuthorized(event))
@@ -433,17 +503,30 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         ipcMain.handle(translationIpcChannels.captureSelection, async (event, payload) => {
             if (!isSenderAuthorized(event))
                 return failure('unauthorized', 'IPC sender is not authorized.');
-            if (payload !== undefined && !emptyPayloadSchema.safeParse(payload).success)
+            const parsed = selectionCaptureStartSchema.safeParse(payload);
+            if (!parsed.success)
                 return failure('invalid-request', 'Selection capture request is invalid.');
-
+            const { taskId } = parsed.data;
+            if (activeTasks.has(taskId))
+                return failure('invalid-request', 'Selection translation request is invalid.');
+            const record = createActiveTask(taskId, event, 'selection');
+            sendStarted(record);
             try {
-                const capture = await selection.captureSelectionOnce();
+                const capture = await selection.captureSelectionOnce(record.controller.signal);
+                if (record.cancelled || record.controller.signal.aborted)
+                    return failure('aborted', providerErrorMessage('aborted'));
+                record.sourceText = capture.sourceText;
                 return {
                     ok: true,
                     value: capture
                 } satisfies IpcSuccess<SelectionCapture>;
             } catch (error) {
+                if (record.cancelled || record.controller.signal.aborted)
+                    return failure('aborted', providerErrorMessage('aborted'));
                 return safeSelectionFailure(error);
+            } finally {
+                if (record.cancelled || record.sourceText === undefined)
+                    activeTasks.delete(taskId);
             }
         });
 
@@ -454,19 +537,31 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             if (!parsed.success)
                 return failure('invalid-request', 'Selection translation request is invalid.');
 
-            const controller = new AbortController();
-            const taskId = randomUUID();
-            let capturedSourceText = parsed.data.sourceText;
-            activeTasks.set(taskId, controller);
+            const taskId = parsed.data.taskId ?? randomUUID();
+            const existing = parsed.data.taskId === undefined
+                ? undefined
+                : activeTasks.get(taskId);
+            if (parsed.data.taskId !== undefined && existing === undefined) {
+                const result = failure('aborted', providerErrorMessage('aborted'));
+                const task = failedSelectionTask(
+                    taskId,
+                    parsed.data.sourceText ?? 'Capturing selected text',
+                    result.error,
+                    await activeProviderTaskDetails(secureConfig)
+                );
+                return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
+            }
+            const record = existing ?? createActiveTask(taskId, event, 'selection');
+            const controller = record.controller;
+            let capturedSourceText = parsed.data.sourceText ?? record.sourceText;
             const onTaskId = (startedTaskId: string): void => {
-                if (startedTaskId !== taskId)
+                if (startedTaskId !== taskId || record.terminalSent)
                     return;
-                sendEvent(event, {
-                    type: 'started',
-                    taskId
-                });
+                sendStarted(record);
             };
             try {
+                if (record.cancelled)
+                    return { ok: true, value: record.cancelledTask ?? await cancelActiveTask(record) };
                 const task = await selection.translateSelection({
                     taskId,
                     signal: controller.signal,
@@ -474,9 +569,10 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     sourceText: capturedSourceText,
                     onSourceText: (sourceText) => {
                         capturedSourceText = sourceText;
+                        record.sourceText = sourceText;
                     },
                     onDelta: (delta) => {
-                        if (taskId !== undefined) {
+                        if (!record.cancelled && !record.terminalSent) {
                             sendEvent(event, {
                                 type: 'delta',
                                 taskId,
@@ -485,14 +581,28 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                         }
                     }
                 });
+                if (record.cancelled || controller.signal.aborted) {
+                    return {
+                        ok: true,
+                        value: record.cancelledTask ?? await cancelActiveTask(record)
+                    };
+                }
                 if (task.status === 'completed') {
+                    record.terminalSent = true;
                     sendEvent(event, { type: 'completed', task });
                     return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
                 }
                 const error = taskFailure(task);
+                record.terminalSent = true;
                 sendEvent(event, { type: 'failed', taskId: task.id, error, task });
                 return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } catch (error) {
+                if (record.cancelled || controller.signal.aborted) {
+                    return {
+                        ok: true,
+                        value: record.cancelledTask ?? await cancelActiveTask(record)
+                    };
+                }
                 const result = controller.signal.aborted
                     ? failure('aborted', providerErrorMessage('aborted'))
                     : safeSelectionFailure(error);
@@ -502,15 +612,19 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     result.error,
                     await activeProviderTaskDetails(secureConfig)
                 );
-                sendEvent(event, {
-                    type: 'failed',
-                    taskId,
-                    error: result.error,
-                    task
-                });
+                if (!record.terminalSent) {
+                    record.terminalSent = true;
+                    sendEvent(event, {
+                        type: 'failed',
+                        taskId,
+                        error: result.error,
+                        task
+                    });
+                }
                 return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } finally {
-                activeTasks.delete(taskId);
+                if (activeTasks.get(taskId) === record)
+                    activeTasks.delete(taskId);
             }
         });
 
@@ -524,16 +638,14 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             if (!parsed.success)
                 return failure('invalid-request', 'Screenshot translation request is invalid.');
 
-            const controller = new AbortController();
             const taskId = randomUUID();
-            activeTasks.set(taskId, controller);
+            const record = createActiveTask(taskId, event, 'screenshot', {
+                bounds: parsed.data.bounds
+            });
+            const controller = record.controller;
             const onTaskId = (startedTaskId: string): void => {
-                if (startedTaskId === taskId) {
-                    sendEvent(event, {
-                        type: 'started',
-                        taskId
-                    });
-                }
+                if (startedTaskId === taskId)
+                    sendStarted(record);
             };
             try {
                 const task = await screenshot.translateScreenshot(parsed.data.bounds, {
@@ -541,14 +653,28 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     signal: controller.signal,
                     onTaskId
                 });
+                if (record.cancelled || controller.signal.aborted) {
+                    return {
+                        ok: true,
+                        value: record.cancelledTask ?? await cancelActiveTask(record)
+                    };
+                }
                 if (task.status === 'completed') {
+                    record.terminalSent = true;
                     sendEvent(event, { type: 'completed', task });
                     return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
                 }
                 const error = taskFailure(task);
+                record.terminalSent = true;
                 sendEvent(event, { type: 'failed', taskId: task.id, error, task });
                 return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } catch (error) {
+                if (record.cancelled || controller.signal.aborted) {
+                    return {
+                        ok: true,
+                        value: record.cancelledTask ?? await cancelActiveTask(record)
+                    };
+                }
                 const result = controller.signal.aborted
                     ? failure('aborted', providerErrorMessage('aborted'))
                     : safeFailure(error);
@@ -558,15 +684,19 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     result.error,
                     await activeProviderTaskDetails(secureConfig)
                 );
-                sendEvent(event, {
-                    type: 'failed',
-                    taskId,
-                    error: result.error,
-                    task
-                });
+                if (!record.terminalSent) {
+                    record.terminalSent = true;
+                    sendEvent(event, {
+                        type: 'failed',
+                        taskId,
+                        error: result.error,
+                        task
+                    });
+                }
                 return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } finally {
-                activeTasks.delete(taskId);
+                if (activeTasks.get(taskId) === record)
+                    activeTasks.delete(taskId);
             }
         });
     }
@@ -578,10 +708,10 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             const parsed = translationCancelSchema.safeParse(payload);
             if (!parsed.success)
                 return failure('invalid-request', 'Translation cancellation request is invalid.');
-            const controller = activeTasks.get(parsed.data.taskId);
-            if (controller === undefined)
+            const record = activeTasks.get(parsed.data.taskId);
+            if (record === undefined)
                 return failure('invalid-request', 'Translation task was not found.');
-            controller.abort();
+            await cancelActiveTask(record);
             return { ok: true } satisfies IpcSaveSuccess;
         });
     }
@@ -600,8 +730,8 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         ipcMain.removeHandler(translationIpcChannels.translateSelection);
         ipcMain.removeHandler(screenshotIpcChannels.translate);
         ipcMain.removeHandler(translationIpcChannels.cancel);
-        for (const controller of activeTasks.values())
-            controller.abort();
+        for (const record of activeTasks.values())
+            record.controller.abort();
         activeTasks.clear();
     };
 }

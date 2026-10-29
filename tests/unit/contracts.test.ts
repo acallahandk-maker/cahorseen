@@ -11,8 +11,10 @@ import {
     quizFeedbackSchema,
     quizQuestionSchema,
     screenBoundsSchema,
+    selectionCaptureStartSchema,
     selectionCaptureSchema,
     screenshotTranslationStartSchema,
+    translationStartSchema,
     translationTaskSchema
 } from '../../src/shared/contracts';
 
@@ -207,6 +209,17 @@ describe('shared contracts', () => {
             sourceText: 'selected',
             method: 'accessibility',
             clipboardRestored: true
+        });
+        expect(selectionCaptureStartSchema.parse({ taskId: 'selection-task' })).toEqual({
+            taskId: 'selection-task'
+        });
+        expect(() => selectionCaptureStartSchema.parse({})).toThrow();
+        expect(translationStartSchema.parse({
+            taskId: 'selection-task',
+            sourceText: 'exact selected text'
+        })).toEqual({
+            taskId: 'selection-task',
+            sourceText: 'exact selected text'
         });
         expect(capturedImageSchema.parse({
             dataUrl: 'data:image/png;base64,abc',

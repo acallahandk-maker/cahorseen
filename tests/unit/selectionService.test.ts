@@ -145,6 +145,74 @@ describe('selectionService', () => {
         expect(captureAdapter.restoreClipboard).toHaveBeenCalledWith(snapshot);
     });
 
+    it('settles a pending accessibility capture when its abort signal fires', async () => {
+        const controller = new AbortController();
+        let resolveCapture: ((sourceText: string) => void) | undefined;
+        const captureAdapter = adapter({
+            readAccessibilitySelection: vi.fn(() => new Promise<string>(
+                (resolve) => {
+                    resolveCapture = resolve;
+                }
+            ))
+        });
+
+        const capturePromise = service(captureAdapter, runner()).captureSelectionOnce(controller.signal);
+        const captureSettlement = capturePromise.then(
+            () => 'resolved',
+            () => 'rejected'
+        );
+        controller.abort();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const settledBeforeStaleCapture = await Promise.race([
+            captureSettlement,
+            Promise.resolve('pending')
+        ]);
+        resolveCapture?.('stale selected text');
+
+        expect(settledBeforeStaleCapture).toBe('rejected');
+        await expect(capturePromise).rejects.toMatchObject({
+            name: 'SelectionError',
+            code: 'aborted'
+        });
+        expect(captureAdapter.saveClipboard).not.toHaveBeenCalled();
+    });
+
+    it('restores clipboard contents when cancellation arrives during clipboard fallback', async () => {
+        const controller = new AbortController();
+        const snapshot = { items: ['original'] };
+        let rejectCopy: ((error: unknown) => void) | undefined;
+        const captureAdapter = adapter({
+            readAccessibilitySelection: vi.fn(async () => ''),
+            saveClipboard: vi.fn(async () => snapshot),
+            copySelectionToClipboard: vi.fn(() => new Promise<void>(
+                (_resolve, reject) => {
+                    rejectCopy = reject;
+                }
+            )),
+            restoreClipboard: vi.fn(async () => undefined)
+        });
+
+        const capturePromise = service(captureAdapter, runner()).captureSelectionOnce(controller.signal);
+        const captureSettlement = capturePromise.then(
+            () => 'resolved',
+            () => 'rejected'
+        );
+        await vi.waitFor(() => {
+            expect(captureAdapter.copySelectionToClipboard).toHaveBeenCalledTimes(1);
+        });
+        controller.abort();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(captureAdapter.restoreClipboard).toHaveBeenCalledWith(snapshot);
+        rejectCopy?.(new DOMException('cancelled', 'AbortError'));
+        expect(await captureSettlement).toBe('rejected');
+        await expect(capturePromise).rejects.toMatchObject({
+            name: 'SelectionError',
+            code: 'aborted'
+        });
+        expect(captureAdapter.restoreClipboard).toHaveBeenCalledWith(snapshot);
+    });
+
     it('returns a failed task and preserves clipboard contents when translation fails', async () => {
         const snapshot = { items: ['original'] };
         const captureAdapter = adapter({

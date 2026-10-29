@@ -307,6 +307,7 @@ export const translationEventSchema = z.discriminatedUnion('type', [
 ]);
 
 export const translationStartSchema = z.strictObject({
+    taskId: z.string().min(1).max(128).optional(),
     sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS).optional()
 });
 
@@ -363,6 +364,10 @@ export const selectionCaptureSchema = z.strictObject({
     sourceText: nonEmptyString,
     method: z.enum(['accessibility', 'clipboard']),
     clipboardRestored: z.boolean()
+});
+
+export const selectionCaptureStartSchema = z.strictObject({
+    taskId: z.string().min(1).max(128)
 });
 
 export const screenshotSelectionSchema = z.strictObject({
