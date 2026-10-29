@@ -14,6 +14,10 @@ export default defineConfig({
                     translationWorker: resolve(
                         projectRoot,
                         'src/main/workers/translationWorker.ts'
+                    ),
+                    memoryWorker: resolve(
+                        projectRoot,
+                        'src/main/workers/memoryWorker.ts'
                     )
                 }
             }

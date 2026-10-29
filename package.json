@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@pixi/unsafe-eval": "^5.3.12",
+    "better-sqlite3": "^13.0.3",
     "pixi-live2d-display": "0.3.1",
     "pixi.js": "5.3.12",
     "react": "19.3.1",
@@ -30,6 +31,7 @@
     "@testing-library/dom": "10.4.2",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.8",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "26.6.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",

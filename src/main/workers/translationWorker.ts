@@ -15,7 +15,9 @@ import {
     capturedImageSchema,
     providerConfigSchema,
     translationErrorCodeSchema,
-    type ProviderErrorCode
+    type ProviderErrorCode,
+    type ScreenBounds,
+    type TranslationTask
 } from '../../shared/contracts';
 import {
     OpenAiClient,
@@ -59,6 +61,7 @@ export interface ImageTranslationRunner {
 export interface TranslationWorkerRunnerOptions {
     workerPath: string;
     workerFactory?: (filename: string, options: WorkerOptions) => Worker;
+    onTaskCompleted?: (task: TranslationTask) => void | Promise<void>;
 }
 
 const textTranslationRunnerRequestSchema = z.strictObject({
@@ -158,6 +161,47 @@ function runnerError(code: z.infer<typeof translationErrorCodeSchema>): Error {
 
 type RunnerRequest = TranslationRunnerRequest | ImageTranslationRunnerRequest;
 
+export function createCompletedSelectionTask(
+    request: TranslationRunnerRequest,
+    result: TranslationResult
+): TranslationTask {
+    return {
+        id: request.taskId,
+        status: 'completed',
+        kind: 'selection',
+        sourceText: request.sourceText,
+        translatedText: result.translatedText,
+        targetLanguage: request.targetLanguage,
+        retryInput: {
+            kind: 'selection',
+            strategy: 'reuse-source',
+            sourceText: request.sourceText
+        }
+    };
+}
+
+export function createCompletedScreenshotTask(
+    request: ImageTranslationRunnerRequest,
+    result: TranslationResult,
+    bounds: ScreenBounds
+): TranslationTask {
+    return {
+        id: request.taskId,
+        status: 'completed',
+        kind: 'screenshot',
+        sourceText: 'Screenshot region',
+        translatedText: result.translatedText,
+        sourceLanguage: 'und',
+        targetLanguage: request.targetLanguage,
+        bounds,
+        retryInput: {
+            kind: 'screenshot',
+            strategy: 'recapture',
+            bounds
+        }
+    };
+}
+
 async function runWorker(request: RunnerRequest): Promise<void> {
     const isImageRequest = (request as { kind?: unknown }).kind === 'image';
     const parsed = isImageRequest
@@ -212,9 +256,11 @@ async function runWorker(request: RunnerRequest): Promise<void> {
 export class TranslationWorkerRunner implements TranslationRunner, ImageTranslationRunner {
     private readonly workerPath: string;
     private readonly workerFactory: (filename: string, options: WorkerOptions) => Worker;
+    private readonly onTaskCompleted: ((task: TranslationTask) => void | Promise<void>) | undefined;
 
     constructor(options: TranslationWorkerRunnerOptions) {
         this.workerPath = options.workerPath;
+        this.onTaskCompleted = options.onTaskCompleted;
         this.workerFactory = options.workerFactory ?? ((filename, workerOptions) => new Worker(
             filename,
             workerOptions
@@ -296,6 +342,14 @@ export class TranslationWorkerRunner implements TranslationRunner, ImageTranslat
                 if (message.type === 'completed') {
                     finish(() => {
                         void worker.terminate();
+                        if (this.onTaskCompleted !== undefined && parsed.data.kind !== 'image') {
+                            void Promise.resolve(this.onTaskCompleted(
+                                createCompletedSelectionTask(parsed.data, {
+                                    translatedText: message.translatedText,
+                                    model: message.model
+                                })
+                            )).catch(() => undefined);
+                        }
                         resolve({
                             translatedText: message.translatedText,
                             model: message.model
