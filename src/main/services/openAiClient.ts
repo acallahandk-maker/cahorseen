@@ -26,6 +26,8 @@ export const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
 export const MAX_NON_STREAMING_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_STREAMING_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PROVIDER_ERROR_RESPONSE_BYTES = 64 * 1024;
+const MAX_STRUCTURED_IMAGE_RESPONSE_CHARS =
+    MAX_SOURCE_TEXT_CHARS + MAX_TRANSLATED_TEXT_CHARS + 1_024;
 
 const providerErrorMessages: Record<ProviderErrorCode, string> = {
     'invalid-config': 'Provider configuration is invalid.',
@@ -86,9 +88,11 @@ export interface ImageTranslationRequest {
     image: CapturedImage;
     context?: string;
     targetLanguage: string;
+    structuredResponse?: boolean;
 }
 
 export interface TranslationResult {
+    sourceText?: string;
     translatedText: string;
     model: string;
     memoryStatus?: MemoryPersistenceStatus;
@@ -174,6 +178,17 @@ function requireNonEmpty(value: unknown, maximumLength: number): string {
 
 function translationInstruction(targetLanguage: string): string {
     return `Translate the following content into ${targetLanguage}. Return only the translation.`;
+}
+
+function imageTranslationInstruction(targetLanguage: string, structured: boolean): string {
+    if (!structured)
+        return translationInstruction(targetLanguage);
+    return [
+        `Translate the useful text visible in this image into ${targetLanguage}.`,
+        'Return only one JSON object with exactly the fields "sourceText" and "translatedText".',
+        'Set "sourceText" to the transcribed source text and "translatedText" to its translation.',
+        'Do not include image data, URLs, secrets, markdown, or additional keys.'
+    ].join(' ');
 }
 
 function chatCompletionUrl(baseUrl: string): string {
@@ -347,7 +362,7 @@ async function withRequestSignal<T>(
     }
 }
 
-function parseTranslationResponse(payload: unknown): string {
+function parseResponseContent(payload: unknown, maximumLength: number): string {
     if (typeof payload !== 'object' || payload === null)
         throw new ProviderError('invalid-response');
 
@@ -366,10 +381,43 @@ function parseTranslationResponse(payload: unknown): string {
     const content = (message as { content?: unknown }).content;
     if (typeof content !== 'string' || content.trim().length === 0)
         throw new ProviderError('invalid-response');
-    if (content.length > MAX_TRANSLATED_TEXT_CHARS)
+    if (content.length > maximumLength)
         throw new ProviderError('invalid-response');
 
     return content;
+}
+
+function parseTranslationResponse(payload: unknown): string {
+    return parseResponseContent(payload, MAX_TRANSLATED_TEXT_CHARS);
+}
+
+function parseStructuredImageResponseText(content: string): {
+    sourceText: string;
+    translatedText: string;
+} {
+    let payload: unknown;
+    try {
+        payload = JSON.parse(content);
+    } catch {
+        throw new ProviderError('invalid-response');
+    }
+    if (typeof payload !== 'object' || payload === null)
+        throw new ProviderError('invalid-response');
+    const sourceText = (payload as { sourceText?: unknown }).sourceText;
+    const translatedText = (payload as { translatedText?: unknown }).translatedText;
+    if (
+        typeof sourceText !== 'string'
+        || sourceText.trim().length === 0
+        || sourceText.length > MAX_SOURCE_TEXT_CHARS
+        || typeof translatedText !== 'string'
+        || translatedText.trim().length === 0
+        || translatedText.length > MAX_TRANSLATED_TEXT_CHARS
+    )
+        throw new ProviderError('invalid-response');
+    return {
+        sourceText: sourceText.trim(),
+        translatedText
+    };
 }
 
 export function validateCapturedImageRequest(image: CapturedImage): CapturedImage {
@@ -428,7 +476,8 @@ function parseStreamDelta(payload: unknown): string | undefined {
 async function parseStreamingResponse(
     response: Response,
     signal: AbortSignal,
-    onDelta?: TranslationDeltaHandler
+    onDelta?: TranslationDeltaHandler,
+    maximumLength = MAX_TRANSLATED_TEXT_CHARS
 ): Promise<string> {
     let eventBuffer = '';
     let translatedText = '';
@@ -457,7 +506,7 @@ async function parseStreamingResponse(
         const delta = parseStreamDelta(payload);
         if (delta === undefined || delta.length === 0)
             return;
-        if (translatedText.length + delta.length > MAX_TRANSLATED_TEXT_CHARS)
+        if (translatedText.length + delta.length > maximumLength)
             throw new ProviderError('invalid-response');
 
         translatedText += delta;
@@ -536,13 +585,14 @@ export class OpenAiClient {
         const contextSection = context === undefined
             ? ''
             : `\n\nContext:\n${context}`;
+        const structured = request.structuredResponse === true;
         const messages: ChatCompletionBody['messages'] = [
             {
                 role: 'user',
                 content: [
                     {
                         type: 'text',
-                        text: `${translationInstruction(targetLanguage)}${contextSection}`
+                        text: `${imageTranslationInstruction(targetLanguage, structured)}${contextSection}`
                     },
                     {
                         type: 'image_url',
@@ -557,7 +607,14 @@ export class OpenAiClient {
         if (provider.systemPrompt !== undefined)
             messages.unshift({ role: 'system', content: provider.systemPrompt });
 
-        return this.requestTranslation(provider, messages, signal, onDelta, 'vision');
+        return this.requestTranslation(
+            provider,
+            messages,
+            signal,
+            onDelta,
+            'vision',
+            structured
+        );
     }
 
     private async requestTranslation(
@@ -565,7 +622,8 @@ export class OpenAiClient {
         messages: ChatCompletionBody['messages'],
         signal: AbortSignal | undefined,
         onDelta?: TranslationDeltaHandler,
-        capability: 'text' | 'vision' = 'text'
+        capability: 'text' | 'vision' = 'text',
+        structuredImage = false
     ): Promise<TranslationResult> {
         const body: ChatCompletionBody = {
             model: '',
@@ -609,14 +667,20 @@ export class OpenAiClient {
                 }
 
                 if (body.stream) {
-                    return {
-                        translatedText: await parseStreamingResponse(
-                            response,
-                            requestSignal,
-                            onDelta
-                        ),
-                        model
-                    };
+                    const streamedText = await parseStreamingResponse(
+                        response,
+                        requestSignal,
+                        structuredImage ? undefined : onDelta,
+                        structuredImage
+                            ? MAX_STRUCTURED_IMAGE_RESPONSE_CHARS
+                            : MAX_TRANSLATED_TEXT_CHARS
+                    );
+                    if (structuredImage) {
+                        const structured = parseStructuredImageResponseText(streamedText);
+                        onDelta?.(structured.translatedText);
+                        return { ...structured, model };
+                    }
+                    return { translatedText: streamedText, model };
                 }
 
                 let payload: unknown;
@@ -632,10 +696,14 @@ export class OpenAiClient {
                     throw new ProviderError('invalid-response');
                 }
 
-                return {
-                    translatedText: parseTranslationResponse(payload),
-                    model
-                };
+                if (structuredImage) {
+                    const structured = parseStructuredImageResponseText(parseResponseContent(
+                        payload,
+                        MAX_STRUCTURED_IMAGE_RESPONSE_CHARS
+                    ));
+                    return { ...structured, model };
+                }
+                return { translatedText: parseTranslationResponse(payload), model };
             }
         );
     }

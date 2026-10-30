@@ -54,6 +54,40 @@ type LegacyOccurrenceRow = {
     occurred_at: string;
 };
 
+type StoredEntryRow = {
+    id: string;
+    source_text: string;
+    normalized_source: string;
+    translated_text: string;
+    source_language: string;
+    target_language: string;
+    first_seen_at_ms: number | string;
+    last_used_at_ms: number | string;
+    context: string;
+    quiz_interval_days: number;
+    next_due_at_ms: number | string;
+};
+
+type StoredOccurrenceRow = {
+    entry_id: string;
+    task_id: string;
+    occurred_at_ms: number | string;
+};
+
+type MergedEntryRow = {
+    id: string;
+    source_text: string;
+    normalized_source: string;
+    translated_text: string;
+    source_language: string;
+    target_language: string;
+    first_seen_at_ms: number;
+    last_used_at_ms: number;
+    context: string;
+    quiz_interval_days: number;
+    next_due_at_ms: number;
+};
+
 type WorkerFilter = Extract<MemoryWorkerRequest, { operation: 'queryHeat' }>['filter'];
 type WorkerEntryPatch = Extract<MemoryWorkerRequest, { operation: 'updateEntry' }>['patch'];
 
@@ -92,8 +126,8 @@ function toIso(milliseconds: number): string {
     return new Date(milliseconds).toISOString();
 }
 
-function toEpochMilliseconds(value: string): number {
-    const milliseconds = Date.parse(value);
+function toEpochMilliseconds(value: string | number): number {
+    const milliseconds = typeof value === 'number' ? value : Date.parse(value);
     if (!Number.isFinite(milliseconds))
         throw new Error('invalid timestamp');
     return milliseconds;
@@ -181,6 +215,155 @@ function createEpochSchema(database: DatabaseType): void {
     `);
 }
 
+function mergedIdentity(entry: StoredEntryRow): string {
+    return JSON.stringify([
+        normalizeSource(entry.source_text),
+        normalizeLanguage(entry.source_language, 'unknown'),
+        normalizeLanguage(entry.target_language, 'unknown')
+    ]);
+}
+
+function entryPreference(entry: StoredEntryRow): number {
+    return (entry.context.trim().length > 0 ? 2 : 0)
+        + (entry.quiz_interval_days === 1 ? 0 : 1);
+}
+
+function preferEntry(current: StoredEntryRow, candidate: StoredEntryRow): StoredEntryRow {
+    const preference = entryPreference(candidate) - entryPreference(current);
+    if (preference !== 0)
+        return preference > 0 ? candidate : current;
+    return toEpochMilliseconds(candidate.last_used_at_ms)
+        > toEpochMilliseconds(current.last_used_at_ms)
+        ? candidate
+        : current;
+}
+
+function mergeStoredEntries(entries: StoredEntryRow[]): MergedEntryRow[] {
+    const merged = new Map<string, {
+        candidates: StoredEntryRow[];
+        entry: StoredEntryRow;
+    }>();
+    for (const entry of entries) {
+        const key = mergedIdentity(entry);
+        const previous = merged.get(key);
+        merged.set(key, {
+            candidates: previous === undefined ? [entry] : [...previous.candidates, entry],
+            entry: previous === undefined ? entry : preferEntry(previous.entry, entry)
+        });
+    }
+    return [...merged.values()].map(({ candidates, entry }) => {
+        const firstSeenAtMs = Math.min(...candidates.map((candidate) => (
+            toEpochMilliseconds(candidate.first_seen_at_ms)
+        )));
+        const lastUsedAtMs = Math.max(...candidates.map((candidate) => (
+            toEpochMilliseconds(candidate.last_used_at_ms)
+        )));
+        return {
+            id: entry.id,
+            source_text: entry.source_text.trim(),
+            normalized_source: normalizeSource(entry.source_text),
+            translated_text: entry.translated_text,
+            source_language: normalizeLanguage(entry.source_language, 'unknown'),
+            target_language: normalizeLanguage(entry.target_language, 'unknown'),
+            first_seen_at_ms: firstSeenAtMs,
+            last_used_at_ms: lastUsedAtMs,
+            context: entry.context,
+            quiz_interval_days: entry.quiz_interval_days,
+            next_due_at_ms: toEpochMilliseconds(entry.next_due_at_ms)
+        };
+    });
+}
+
+function reconcileStoredEntries(database: DatabaseType, now: string): void {
+    const entries = database.prepare(
+        'SELECT * FROM entries ORDER BY id'
+    ).all() as StoredEntryRow[];
+    const occurrences = database.prepare(
+        'SELECT * FROM occurrences ORDER BY id'
+    ).all() as StoredOccurrenceRow[];
+    const mergedEntries = mergeStoredEntries(entries);
+    const entryIdentityById = new Map(
+        entries.map((entry) => [entry.id, mergedIdentity(entry)])
+    );
+    const mergedById = new Map(
+        mergedEntries.map((entry) => [
+            JSON.stringify([
+                entry.normalized_source,
+                entry.source_language,
+                entry.target_language
+            ]),
+            entry
+        ])
+    );
+    database.pragma('foreign_keys = OFF');
+    try {
+        database.transaction(() => {
+            database.exec('DROP TABLE occurrences; DROP TABLE entries;');
+            createEpochSchema(database);
+            const insertEntry = database.prepare(`
+                INSERT INTO entries (
+                    id, source_text, normalized_source, translated_text,
+                    source_language, target_language, first_seen_at_ms,
+                    last_used_at_ms, context, quiz_interval_days, next_due_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+            for (const entry of mergedEntries) {
+                insertEntry.run(
+                    entry.id,
+                    entry.source_text,
+                    entry.normalized_source,
+                    entry.translated_text,
+                    entry.source_language,
+                    entry.target_language,
+                    entry.first_seen_at_ms,
+                    entry.last_used_at_ms,
+                    entry.context,
+                    entry.quiz_interval_days,
+                    entry.next_due_at_ms
+                );
+            }
+            const insertOccurrence = database.prepare(`
+                INSERT INTO occurrences(entry_id, task_id, occurred_at_ms)
+                VALUES (?, ?, ?)
+                ON CONFLICT(entry_id, task_id) DO NOTHING
+            `);
+            const updateDates = database.prepare(`
+                UPDATE entries SET
+                    first_seen_at_ms = CASE WHEN ? < first_seen_at_ms THEN ? ELSE first_seen_at_ms END,
+                    last_used_at_ms = CASE WHEN ? > last_used_at_ms THEN ? ELSE last_used_at_ms END
+                WHERE id = ?
+            `);
+            const seenOccurrences = new Set<string>();
+            for (const occurrence of occurrences) {
+                const identity = entryIdentityById.get(occurrence.entry_id);
+                if (identity === undefined)
+                    throw new Error('orphan occurrence');
+                const entry = mergedById.get(identity);
+                if (entry === undefined)
+                    throw new Error('orphan occurrence');
+                const occurredAtMs = toEpochMilliseconds(occurrence.occurred_at_ms);
+                updateDates.run(
+                    occurredAtMs,
+                    occurredAtMs,
+                    occurredAtMs,
+                    occurredAtMs,
+                    entry.id
+                );
+                const occurrenceKey = JSON.stringify([entry.id, occurrence.task_id]);
+                if (seenOccurrences.has(occurrenceKey))
+                    continue;
+                seenOccurrences.add(occurrenceKey);
+                insertOccurrence.run(entry.id, occurrence.task_id, occurredAtMs);
+            }
+            database.prepare(
+                'INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)'
+            ).run(now);
+        })();
+    } finally {
+        database.pragma('foreign_keys = ON');
+    }
+}
+
 function migrate(database: DatabaseType, now: string): void {
     database.pragma('journal_mode = WAL');
     database.pragma('synchronous = FULL');
@@ -244,6 +427,8 @@ function migrate(database: DatabaseType, now: string): void {
             database.pragma('foreign_keys = ON');
         }
     }
+    if (current.version < 3)
+        reconcileStoredEntries(database, now);
     database.pragma('foreign_keys = ON');
 }
 

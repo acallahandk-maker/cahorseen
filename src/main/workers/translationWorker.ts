@@ -85,7 +85,8 @@ const imageTranslationRunnerRequestSchema = z.strictObject({
     provider: providerConfigSchema,
     image: capturedImageSchema,
     context: z.string().max(MAX_CONTEXT_CHARS).optional(),
-    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS)
+    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS),
+    structuredResponse: z.boolean().optional()
 });
 
 const workerMessageSchema = z.discriminatedUnion('type', [
@@ -97,6 +98,7 @@ const workerMessageSchema = z.discriminatedUnion('type', [
     z.strictObject({
         type: z.literal('completed'),
         taskId: z.string().min(1),
+        sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS).optional(),
         translatedText: z.string().max(MAX_TRANSLATED_TEXT_CHARS),
         model: z.string().min(1)
     }),
@@ -240,7 +242,8 @@ async function runWorker(request: RunnerRequest): Promise<void> {
                 provider: parsed.data.provider,
                 image: parsed.data.image,
                 context: parsed.data.context,
-                targetLanguage: parsed.data.targetLanguage
+                targetLanguage: parsed.data.targetLanguage,
+                structuredResponse: parsed.data.structuredResponse
             }, undefined, emitDelta)
             : await client.translateText({
                 provider: parsed.data.provider,
@@ -251,6 +254,7 @@ async function runWorker(request: RunnerRequest): Promise<void> {
         parentPort.postMessage({
             type: 'completed',
             taskId: parsed.data.taskId,
+            sourceText: result.sourceText,
             translatedText: result.translatedText,
             model: result.model
         } satisfies WorkerMessage);
@@ -351,6 +355,7 @@ export class TranslationWorkerRunner implements TranslationRunner, ImageTranslat
                     finish(() => {
                         void worker.terminate();
                         const result: TranslationResult = {
+                            sourceText: message.sourceText,
                             translatedText: message.translatedText,
                             model: message.model
                         };

@@ -108,6 +108,7 @@ describe('production memory recording', () => {
         const recordTranslation = vi.fn(async () => undefined);
         const successfulRunner = {
             runImage: async (): Promise<TranslationResult> => ({
+                sourceText: 'Bonjour le monde',
                 translatedText: 'Traduit',
                 model: 'vision-model'
             })
@@ -130,7 +131,10 @@ describe('production memory recording', () => {
         });
         expect(completed.status).toBe('completed');
         expect(completed.kind).toBe('screenshot');
-        expect(recordTranslation).toHaveBeenCalledExactlyOnceWith(completed);
+        expect(recordTranslation).toHaveBeenCalledExactlyOnceWith({
+            ...completed,
+            sourceText: 'Bonjour le monde'
+        });
 
         const failedService = new ScreenshotService({
             captureAdapter: screenshotAdapter(),
@@ -161,6 +165,41 @@ describe('production memory recording', () => {
         });
         expect(cancelled.status).toBe('failed');
         expect(recordTranslation).toHaveBeenCalledTimes(1);
+    });
+
+    it('never records placeholder screenshot sources when vision output lacks source text', async () => {
+        const recordTranslation = vi.fn(async () => undefined);
+        const service = new ScreenshotService({
+            captureAdapter: screenshotAdapter(),
+            translationRunner: {
+                runImage: async (): Promise<TranslationResult> => ({
+                    translatedText: 'Traduit',
+                    model: 'vision-model'
+                })
+            },
+            getProvider: async () => provider,
+            getDisplays: () => [{ x: 0, y: 0, width: 100, height: 100 }],
+            mapBoundsToCapturePixels: (_displayIndex, bounds) => bounds,
+            recordTranslation
+        });
+
+        const completed = await service.translateScreenshot({
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 10
+        }, {
+            targetLanguage: 'fr-FR'
+        });
+
+        expect(completed.status).toBe('completed');
+        expect(completed.sourceText).toBe('Screenshot region');
+        expect(completed.memoryStatus).toMatchObject({
+            state: 'failed',
+            code: 'invalid-request',
+            recoverable: true
+        });
+        expect(recordTranslation).not.toHaveBeenCalled();
     });
 
     it('reports nonfatal memory persistence errors without failing translation', async () => {

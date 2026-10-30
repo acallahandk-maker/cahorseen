@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
     MAX_CAPTURED_IMAGE_BYTES,
     MAX_CONTEXT_CHARS,
+    MAX_SOURCE_TEXT_CHARS,
     MAX_TARGET_LANGUAGE_CHARS,
     capturedImageSchema,
     screenBoundsSchema,
@@ -26,6 +27,7 @@ import {
 } from '../workers/translationWorker';
 import { getActiveProviderConfig } from './secureConfig';
 import {
+    MemoryDatabaseError,
     memoryFailureStatus,
     memoryRecordedStatus,
     recordTranslation as recordTranslationMemory
@@ -498,7 +500,8 @@ export class ScreenshotService {
                 provider,
                 image,
                 context: options.context,
-                targetLanguage
+                targetLanguage,
+                structuredResponse: this.recordTranslation !== undefined
             };
             const result = await this.translationRunner.runImage(request, options.signal);
             return this.persistCompletedTask({
@@ -520,7 +523,7 @@ export class ScreenshotService {
                 textModel: provider.textModel,
                 visionModel: provider.visionModel,
                 translationModel: result.model
-            });
+            }, result.sourceText);
         } catch (error) {
             return {
                 id: taskId,
@@ -551,11 +554,31 @@ export class ScreenshotService {
         }
     }
 
-    private async persistCompletedTask(task: TranslationTask): Promise<TranslationTask> {
+    private async persistCompletedTask(
+        task: TranslationTask,
+        memorySourceText?: string
+    ): Promise<TranslationTask> {
         if (this.recordTranslation === undefined)
             return task;
+        let taskToRecord = task;
+        if (task.kind === 'screenshot') {
+            const sourceText = memorySourceText?.trim();
+            if (
+                sourceText === undefined
+                || sourceText.length === 0
+                || sourceText.length > MAX_SOURCE_TEXT_CHARS
+            ) {
+                const status = memoryFailureStatus(new MemoryDatabaseError(
+                    'invalid-request',
+                    'Screenshot memory requires useful source text.'
+                ));
+                this.notifyMemoryStatus(status);
+                return { ...task, memoryStatus: status };
+            }
+            taskToRecord = { ...task, sourceText };
+        }
         try {
-            await this.recordTranslation(task);
+            await this.recordTranslation(taskToRecord);
             this.notifyMemoryStatus(memoryRecordedStatus());
             return task;
         } catch (error) {

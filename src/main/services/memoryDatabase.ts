@@ -307,9 +307,11 @@ export class MemoryDatabase {
     private readonly requestTimeoutMs: number;
     private readonly maxQueuedRecords: number;
     private worker: Worker | undefined;
+    private workerTermination: Promise<void> | undefined;
     private readonly pending = new Map<string, PendingRequest>();
     private recordQueue: PendingRecord[] = [];
-    private recordFlushScheduled = false;
+    private outstandingRecordCount = 0;
+    private recordFlushPromise: Promise<void> | undefined;
     private closed = false;
     private closing = false;
 
@@ -335,14 +337,25 @@ export class MemoryDatabase {
         const parsed = translationTaskSchema.safeParse(task);
         if (!parsed.success || parsed.data.status !== 'completed')
             throw new MemoryDatabaseError('invalid-request', 'Only completed translation tasks can be recorded.');
-        if (this.recordQueue.length >= this.maxQueuedRecords)
+        const recordedAtMs = toEpochMilliseconds(this.now());
+        if (this.outstandingRecordCount >= this.maxQueuedRecords)
             throw new MemoryDatabaseError('busy', 'The translation memory queue is saturated.');
+        this.outstandingRecordCount += 1;
         return new Promise<void>((resolve, reject) => {
+            const settle = (): void => {
+                this.outstandingRecordCount -= 1;
+            };
             this.recordQueue.push({
                 task: parsed.data,
-                recordedAtMs: toEpochMilliseconds(this.now()),
-                resolve,
-                reject
+                recordedAtMs,
+                resolve: () => {
+                    settle();
+                    resolve();
+                },
+                reject: (error) => {
+                    settle();
+                    reject(error);
+                }
             });
             this.scheduleRecordFlush();
         });
@@ -424,9 +437,10 @@ export class MemoryDatabase {
     async close(): Promise<void> {
         if (this.closed)
             return;
-        await this.flushRecords();
+        await this.drainRecords();
         this.closed = true;
         this.closing = true;
+        await this.workerTermination;
         const worker = this.worker;
         if (worker === undefined)
             return;
@@ -439,13 +453,23 @@ export class MemoryDatabase {
     }
 
     private scheduleRecordFlush(): void {
-        if (this.recordFlushScheduled)
+        if (this.recordFlushPromise !== undefined)
             return;
-        this.recordFlushScheduled = true;
-        queueMicrotask(() => {
-            this.recordFlushScheduled = false;
-            void this.flushRecords();
-        });
+        const flush = Promise.resolve()
+            .then(() => this.flushRecords())
+            .finally(() => {
+                this.recordFlushPromise = undefined;
+                if (this.recordQueue.length > 0)
+                    this.scheduleRecordFlush();
+            });
+        this.recordFlushPromise = flush;
+    }
+
+    private async drainRecords(): Promise<void> {
+        while (this.outstandingRecordCount > 0) {
+            this.scheduleRecordFlush();
+            await this.recordFlushPromise;
+        }
     }
 
     private async flushRecords(): Promise<void> {
@@ -528,11 +552,19 @@ export class MemoryDatabase {
         if (this.worker !== worker)
             return;
         this.worker = undefined;
-        this.rejectPending(error);
-        void worker.terminate();
+        const termination = worker.terminate()
+            .then(() => undefined)
+            .catch(() => undefined);
+        const cleanup: Promise<void> = termination.finally(() => {
+            if (this.workerTermination === cleanup)
+                this.workerTermination = undefined;
+            this.rejectPending(error);
+        });
+        this.workerTermination = cleanup;
     }
 
-    private send(request: MemoryWorkerRequest): Promise<WorkerSuccessResponse> {
+    private async send(request: MemoryWorkerRequest): Promise<WorkerSuccessResponse> {
+        await this.workerTermination;
         const worker = this.ensureWorker();
         return new Promise<WorkerSuccessResponse>((resolve, reject) => {
             const timer = setTimeout(() => {

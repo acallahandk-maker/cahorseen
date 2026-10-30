@@ -174,6 +174,47 @@ describe('OpenAI-compatible translation client', () => {
         })).toBe(true);
     });
 
+    it('extracts safe source and translation text from structured image responses', async () => {
+        let requestBody: ReturnType<typeof bodyFromInit> | undefined;
+        const client = new OpenAiClient({
+            fetchImpl: async (_input, init) => {
+                requestBody = bodyFromInit(init);
+                return jsonResponse({
+                    choices: [{
+                        message: {
+                            content: JSON.stringify({
+                                sourceText: 'Bonjour le monde',
+                                translatedText: 'Hello world'
+                            })
+                        }
+                    }]
+                });
+            }
+        });
+
+        const result = await client.translateImage({
+            provider,
+            image: {
+                dataUrl: 'data:image/png;base64,AA==',
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+                byteLength: 1
+            },
+            targetLanguage: 'en',
+            structuredResponse: true
+        });
+
+        expect(result).toEqual({
+            sourceText: 'Bonjour le monde',
+            translatedText: 'Hello world',
+            model: 'synthetic-vision-model'
+        });
+        expect(requestBody?.messages.some((message) => {
+            return JSON.stringify(message.content).includes('sourceText');
+        })).toBe(true);
+    });
+
     it('streams text deltas and returns the final translation', async () => {
         let requestBody: ReturnType<typeof bodyFromInit> | undefined;
         const deltas: string[] = [];
