@@ -12,6 +12,7 @@ import {
     type ProviderErrorCode,
     type ProviderConfig
 } from '../../shared/contracts';
+import { validateVocabularySourceText } from '../../shared/vocabularyText';
 
 export {
     MAX_CONTEXT_CHARS,
@@ -414,10 +415,14 @@ function parseStructuredImageResponseText(content: string): {
         || translatedText.length > MAX_TRANSLATED_TEXT_CHARS
     )
         throw new ProviderError('invalid-response');
-    return {
-        sourceText: sourceText.trim(),
-        translatedText
-    };
+    try {
+        return {
+            sourceText: validateVocabularySourceText(sourceText),
+            translatedText
+        };
+    } catch {
+        throw new ProviderError('invalid-response');
+    }
 }
 
 export function validateCapturedImageRequest(image: CapturedImage): CapturedImage {

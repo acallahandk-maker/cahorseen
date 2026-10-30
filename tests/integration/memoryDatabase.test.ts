@@ -155,6 +155,114 @@ function readVersion2Fixture(databasePath: string) {
     return { entries, version: version[0]?.version ?? 0 };
 }
 
+function createCompetingEditsFixture(databasePath: string): void {
+    runSqlite(databasePath, `
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
+        INSERT INTO schema_migrations(version, applied_at)
+        VALUES (3, '2026-10-29T12:00:00.000Z');
+        CREATE TABLE entries (
+            id TEXT PRIMARY KEY,
+            source_text TEXT NOT NULL,
+            normalized_source TEXT NOT NULL,
+            translated_text TEXT NOT NULL,
+            source_language TEXT NOT NULL,
+            target_language TEXT NOT NULL,
+            first_seen_at_ms INTEGER NOT NULL,
+            last_used_at_ms INTEGER NOT NULL,
+            context TEXT NOT NULL,
+            quiz_interval_days INTEGER NOT NULL CHECK (quiz_interval_days > 0),
+            next_due_at_ms INTEGER NOT NULL,
+            UNIQUE(normalized_source, source_language, target_language)
+        );
+        CREATE TABLE occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            occurred_at_ms INTEGER NOT NULL,
+            UNIQUE(entry_id, task_id),
+            FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+        );
+        CREATE TABLE metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT INTO metadata(key, value) VALUES ('memory_enabled', '1');
+        INSERT INTO entries VALUES (
+            'edit-a', 'Straße', 'straße', 'Translation A', 'EN-us', 'FR-fr',
+            ${Date.parse('2026-10-01T00:00:00.000Z')},
+            ${Date.parse('2026-10-02T00:00:00.000Z')}, 'Note A', 2,
+            ${Date.parse('2026-10-05T00:00:00.000Z')}
+        );
+        INSERT INTO entries VALUES (
+            'edit-b', 'STRASSE', 'STRASSE', 'Translation B', 'EN-us', 'FR-fr',
+            ${Date.parse('2026-10-02T00:00:00.000Z')},
+            ${Date.parse('2026-10-04T00:00:00.000Z')}, 'Note B', 5,
+            ${Date.parse('2026-10-08T00:00:00.000Z')}
+        );
+        INSERT INTO entries VALUES (
+            'edit-c', 'strasse', 'Straße', 'Translation C', 'EN-us', 'FR-fr',
+            ${Date.parse('2026-10-03T00:00:00.000Z')},
+            ${Date.parse('2026-10-03T00:00:00.000Z')}, 'Note C', 3,
+            ${Date.parse('2026-10-06T00:00:00.000Z')}
+        );
+        INSERT INTO occurrences(entry_id, task_id, occurred_at_ms)
+        VALUES ('edit-a', 'task-a', ${Date.parse('2026-10-01T00:00:00.000Z')});
+        INSERT INTO occurrences(entry_id, task_id, occurred_at_ms)
+        VALUES ('edit-b', 'task-b', ${Date.parse('2026-10-04T00:00:00.000Z')});
+        INSERT INTO occurrences(entry_id, task_id, occurred_at_ms)
+        VALUES ('edit-c', 'task-c', ${Date.parse('2026-10-03T00:00:00.000Z')});
+    `);
+}
+
+function createBatchRollbackFixture(databasePath: string): void {
+    runSqlite(databasePath, `
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
+        INSERT INTO schema_migrations(version, applied_at)
+        VALUES (4, '2026-10-29T12:00:00.000Z');
+        CREATE TABLE entries (
+            id TEXT PRIMARY KEY,
+            source_text TEXT NOT NULL,
+            normalized_source TEXT NOT NULL,
+            translated_text TEXT NOT NULL,
+            source_language TEXT NOT NULL,
+            target_language TEXT NOT NULL,
+            first_seen_at_ms INTEGER NOT NULL,
+            last_used_at_ms INTEGER NOT NULL,
+            context TEXT NOT NULL,
+            quiz_interval_days INTEGER NOT NULL CHECK (quiz_interval_days > 0),
+            next_due_at_ms INTEGER NOT NULL,
+            UNIQUE(normalized_source, source_language, target_language)
+        );
+        CREATE TABLE occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            occurred_at_ms INTEGER NOT NULL,
+            UNIQUE(entry_id, task_id),
+            FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+        );
+        CREATE TABLE metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT INTO metadata(key, value) VALUES ('memory_enabled', '1');
+        CREATE TRIGGER reject_later_batch_record
+        BEFORE INSERT ON occurrences
+        WHEN NEW.task_id = 'rollback-fail'
+        BEGIN
+            SELECT RAISE(ABORT, 'synthetic occurrence failure');
+        END;
+    `);
+}
+
 function runSqlite(databasePath: string, sql: string): void {
     const result = spawnSync(process.execPath, [sqliteFixturePath, 'exec', databasePath], {
         encoding: 'utf8',
@@ -217,6 +325,34 @@ describe('MemoryDatabase', () => {
             from: '2026-10-29T03:00:00.000+02:00',
             to: '2026-10-29T04:00:00.000+02:00'
         })).resolves.toHaveLength(0);
+    });
+
+    it.each([
+        ['data URL', 'data:image/png;base64,AAAA'],
+        ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
+        ['capture placeholder', 'Screenshot region']
+    ])('rejects %s before queueing memory records', async (_kind, sourceText) => {
+        const { database } = await createMemory();
+        await expect(database.recordTranslation(completedTask({
+            id: 'capture-payload',
+            sourceText
+        }))).rejects.toMatchObject({ code: 'invalid-request' });
+        await expect(database.listEntries()).resolves.toEqual([]);
+    });
+
+    it('rejects capture payloads when updating an entry at the worker boundary', async () => {
+        const { database } = await createMemory();
+        await database.recordTranslation(completedTask());
+        const [entry] = await database.listEntries();
+        if (entry === undefined)
+            throw new Error('Expected an entry to update.');
+        await expect(database.updateEntry(entry.id, {
+            sourceText: 'data:image/png;base64,AAAA'
+        })).rejects.toMatchObject({ code: 'invalid-request' });
+        await expect(database.listEntries()).resolves.toMatchObject([{
+            id: entry.id,
+            sourceText: 'Hello   World'
+        }]);
     });
 
     it('deduplicates normalized repeats per task and keeps a stable entry ID', async () => {
@@ -343,10 +479,12 @@ describe('MemoryDatabase', () => {
     });
 
     it('rolls back earlier records when a later batched occurrence fails', async () => {
-        const { database } = await createMemory();
+        const { database, directory } = await createMemory();
+        const databasePath = join(directory, 'vocabulary-memory.sqlite3');
+        createBatchRollbackFixture(databasePath);
         const writes = [
             database.recordTranslation(completedTask({ id: 'rollback-keep', sourceText: 'Keep' })),
-            database.recordTranslation(completedTask({ id: 'rollback-fail', sourceText: '   ' }))
+            database.recordTranslation(completedTask({ id: 'rollback-fail', sourceText: 'Fail' }))
         ];
 
         const results = await Promise.allSettled(writes);
@@ -473,6 +611,73 @@ describe('MemoryDatabase', () => {
         expect(await database.listEntries()).toHaveLength(1);
     });
 
+    it('preserves competing reconciliation edits with deterministic precedence and history', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'desktop-pet-memory-competing-edits-'));
+        temporaryDirectories.push(directory);
+        const databasePath = join(directory, 'vocabulary-memory.sqlite3');
+        createCompetingEditsFixture(databasePath);
+        const database = new MemoryDatabase({
+            databasePath,
+            workerPath,
+            now: () => new Date('2026-10-29T12:00:00.000Z')
+        });
+        openDatabases.push(database);
+
+        const entries = await database.listEntries();
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+            sourceText: 'STRASSE',
+            normalizedSource: 'strasse',
+            translatedText: 'Translation B',
+            sourceLanguage: 'en-US',
+            targetLanguage: 'fr-FR',
+            firstSeenAt: '2026-10-01T00:00:00.000Z',
+            lastUsedAt: '2026-10-04T00:00:00.000Z',
+            context: 'Note B',
+            quizIntervalDays: 5,
+            nextDueAt: '2026-10-08T00:00:00.000Z',
+            occurrenceCount: 3
+        });
+        await database.close();
+        const history = readSqliteJson(databasePath, `
+            SELECT snapshot_json FROM entry_merge_history ORDER BY entry_id
+        `) as Array<{ snapshot_json: string }>;
+        const snapshots = history.map((row) => JSON.parse(row.snapshot_json) as {
+            id: string;
+            source_text: string;
+            translated_text: string;
+            context: string;
+            quiz_interval_days: number;
+            next_due_at_ms: number;
+        });
+        expect(snapshots).toMatchObject([
+            {
+                id: 'edit-a',
+                source_text: 'Straße',
+                translated_text: 'Translation A',
+                context: 'Note A',
+                quiz_interval_days: 2,
+                next_due_at_ms: Date.parse('2026-10-05T00:00:00.000Z')
+            },
+            {
+                id: 'edit-b',
+                source_text: 'STRASSE',
+                translated_text: 'Translation B',
+                context: 'Note B',
+                quiz_interval_days: 5,
+                next_due_at_ms: Date.parse('2026-10-08T00:00:00.000Z')
+            },
+            {
+                id: 'edit-c',
+                source_text: 'strasse',
+                translated_text: 'Translation C',
+                context: 'Note C',
+                quiz_interval_days: 3,
+                next_due_at_ms: Date.parse('2026-10-06T00:00:00.000Z')
+            }
+        ]);
+    });
+
     it('rolls back duplicate reconciliation when a later occurrence fails', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'desktop-pet-memory-migration-rollback-'));
         temporaryDirectories.push(directory);
@@ -486,6 +691,7 @@ describe('MemoryDatabase', () => {
         openDatabases.push(database);
 
         await expect(database.listEntries()).rejects.toMatchObject({ code: 'worker' });
+        await database.close();
         const fixture = readVersion2Fixture(databasePath);
         expect(fixture.version).toBe(2);
         expect(fixture.entries.map((entry) => entry.normalized_source)).toEqual([
@@ -500,7 +706,7 @@ describe('MemoryDatabase', () => {
             ...completedTask({
                 id: 'private-task',
                 kind: 'screenshot',
-                sourceText: 'Screenshot region',
+                sourceText: 'Hello world',
                 sourceLanguage: 'und',
                 bounds: { x: 1234, y: 5678, width: 640, height: 480 },
                 providerId: 'SECRET_PROVIDER_ID',
@@ -513,6 +719,7 @@ describe('MemoryDatabase', () => {
         const exported = await database.exportEntries('json');
         for (const secret of ['SECRET_PROVIDER_ID', 'SECRET_PROVIDER_NAME', 'SECRET_TEXT_MODEL', 'SECRET_VISION_MODEL', 'SECRET_TRANSLATION_MODEL', 'dataUrl', 'bounds'])
             expect(exported).not.toContain(secret);
+        await database.close();
         const databaseFiles = await Promise.all([
             readFile(join(directory, 'vocabulary-memory.sqlite3')),
             readFile(join(directory, 'vocabulary-memory.sqlite3-wal')).catch(() => Buffer.alloc(0))

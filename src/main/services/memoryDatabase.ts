@@ -16,6 +16,7 @@ import {
     type MemoryPersistenceStatus,
     type TranslationTask
 } from '../../shared/contracts';
+import { validateVocabularySourceText } from '../../shared/vocabularyText';
 
 const timestampSchema = z.string().datetime({ offset: true });
 const nonEmptyString = z.string().min(1);
@@ -337,6 +338,11 @@ export class MemoryDatabase {
         const parsed = translationTaskSchema.safeParse(task);
         if (!parsed.success || parsed.data.status !== 'completed')
             throw new MemoryDatabaseError('invalid-request', 'Only completed translation tasks can be recorded.');
+        try {
+            validateVocabularySourceText(parsed.data.sourceText);
+        } catch {
+            throw new MemoryDatabaseError('invalid-request', 'Vocabulary source text is not safe OCR text.');
+        }
         const recordedAtMs = toEpochMilliseconds(this.now());
         if (this.outstandingRecordCount >= this.maxQueuedRecords)
             throw new MemoryDatabaseError('busy', 'The translation memory queue is saturated.');

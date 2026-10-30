@@ -202,6 +202,45 @@ describe('production memory recording', () => {
         expect(recordTranslation).not.toHaveBeenCalled();
     });
 
+    it.each([
+        ['data URL', 'data:image/png;base64,AAAA'],
+        ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
+        ['capture placeholder', 'Screenshot region']
+    ])('rejects %s at the recording boundary', async (_kind, sourceText) => {
+        const recordTranslation = vi.fn(async () => undefined);
+        const service = new ScreenshotService({
+            captureAdapter: screenshotAdapter(),
+            translationRunner: {
+                runImage: async (): Promise<TranslationResult> => ({
+                    sourceText,
+                    translatedText: 'Traduit',
+                    model: 'vision-model'
+                })
+            },
+            getProvider: async () => provider,
+            getDisplays: () => [{ x: 0, y: 0, width: 100, height: 100 }],
+            mapBoundsToCapturePixels: (_displayIndex, bounds) => bounds,
+            recordTranslation
+        });
+
+        const completed = await service.translateScreenshot({
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 10
+        }, {
+            targetLanguage: 'fr-FR'
+        });
+
+        expect(completed.status).toBe('completed');
+        expect(completed.memoryStatus).toMatchObject({
+            state: 'failed',
+            code: 'invalid-request',
+            recoverable: true
+        });
+        expect(recordTranslation).not.toHaveBeenCalled();
+    });
+
     it('reports nonfatal memory persistence errors without failing translation', async () => {
         const statuses: MemoryPersistenceStatus[] = [];
         const service = new SelectionService({

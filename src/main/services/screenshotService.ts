@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import {
     MAX_CAPTURED_IMAGE_BYTES,
     MAX_CONTEXT_CHARS,
-    MAX_SOURCE_TEXT_CHARS,
     MAX_TARGET_LANGUAGE_CHARS,
     capturedImageSchema,
     screenBoundsSchema,
@@ -15,6 +14,7 @@ import {
     type TranslationErrorCode,
     type TranslationTask
 } from '../../shared/contracts';
+import { validateVocabularySourceText } from '../../shared/vocabularyText';
 import {
     ProviderError,
     providerErrorMessage
@@ -562,12 +562,10 @@ export class ScreenshotService {
             return task;
         let taskToRecord = task;
         if (task.kind === 'screenshot') {
-            const sourceText = memorySourceText?.trim();
-            if (
-                sourceText === undefined
-                || sourceText.length === 0
-                || sourceText.length > MAX_SOURCE_TEXT_CHARS
-            ) {
+            let sourceText: string;
+            try {
+                sourceText = validateVocabularySourceText(memorySourceText ?? '');
+            } catch {
                 const status = memoryFailureStatus(new MemoryDatabaseError(
                     'invalid-request',
                     'Screenshot memory requires useful source text.'

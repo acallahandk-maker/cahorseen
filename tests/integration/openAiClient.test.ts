@@ -215,6 +215,68 @@ describe('OpenAI-compatible translation client', () => {
         })).toBe(true);
     });
 
+    it.each([
+        ['data URL', 'data:image/png;base64,AAAA'],
+        ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
+        ['capture placeholder', 'Screenshot region']
+    ])('rejects %s as structured image source text', async (_kind, sourceText) => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => jsonResponse({
+                choices: [{
+                    message: {
+                        content: JSON.stringify({
+                            sourceText,
+                            translatedText: 'Hello world'
+                        })
+                    }
+                }]
+            })
+        });
+
+        await expect(client.translateImage({
+            provider,
+            image: {
+                dataUrl: 'data:image/png;base64,AA==',
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+                byteLength: 1
+            },
+            targetLanguage: 'en',
+            structuredResponse: true
+        })).rejects.toMatchObject({ code: 'invalid-response' });
+    });
+
+    it('accepts ordinary multilingual OCR source text', async () => {
+        const client = new OpenAiClient({
+            fetchImpl: async () => jsonResponse({
+                choices: [{
+                    message: {
+                        content: JSON.stringify({
+                            sourceText: 'Café — 你好，¿qué tal?\nLine 2.',
+                            translatedText: 'Hello world'
+                        })
+                    }
+                }]
+            })
+        });
+
+        await expect(client.translateImage({
+            provider,
+            image: {
+                dataUrl: 'data:image/png;base64,AA==',
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+                byteLength: 1
+            },
+            targetLanguage: 'en',
+            structuredResponse: true
+        })).resolves.toMatchObject({
+            sourceText: 'Café — 你好，¿qué tal?\nLine 2.'
+        });
+    });
+
     it('streams text deltas and returns the final translation', async () => {
         let requestBody: ReturnType<typeof bodyFromInit> | undefined;
         const deltas: string[] = [];

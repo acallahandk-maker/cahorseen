@@ -12,6 +12,7 @@ import {
     memoryWorkerRequestSchema,
     type MemoryWorkerRequest
 } from '../services/memoryDatabase';
+import { validateVocabularySourceText } from '../../shared/vocabularyText';
 
 const databaseOptionsSchema = z.strictObject({
     databasePath: z.string().min(1)
@@ -88,6 +89,11 @@ type MergedEntryRow = {
     next_due_at_ms: number;
 };
 
+type MergedEntryGroup = {
+    candidates: StoredEntryRow[];
+    entry: MergedEntryRow;
+};
+
 type WorkerFilter = Extract<MemoryWorkerRequest, { operation: 'queryHeat' }>['filter'];
 type WorkerEntryPatch = Extract<MemoryWorkerRequest, { operation: 'updateEntry' }>['patch'];
 
@@ -145,7 +151,8 @@ function isUniqueConstraint(error: unknown): boolean {
 function isInputError(error: unknown): boolean {
     return error instanceof Error
         && (error.message === 'invalid timestamp'
-            || error.message === 'source text must contain non-whitespace characters');
+            || error.message === 'source text must contain non-whitespace characters'
+            || error.message === 'invalid vocabulary source text');
 }
 
 function createLegacySchema(database: DatabaseType, now: string): void {
@@ -212,6 +219,16 @@ function createEpochSchema(database: DatabaseType): void {
         CREATE INDEX idx_occurrences_entry_time
             ON occurrences(entry_id, occurred_at_ms);
         CREATE INDEX idx_occurrences_time ON occurrences(occurred_at_ms);
+        CREATE TABLE IF NOT EXISTS entry_merge_history (
+            identity TEXT NOT NULL,
+            selected_entry_id TEXT NOT NULL,
+            entry_id TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            merged_at TEXT NOT NULL,
+            PRIMARY KEY(identity, entry_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entry_merge_history_selected
+            ON entry_merge_history(selected_entry_id);
     `);
 }
 
@@ -238,7 +255,23 @@ function preferEntry(current: StoredEntryRow, candidate: StoredEntryRow): Stored
         : current;
 }
 
-function mergeStoredEntries(entries: StoredEntryRow[]): MergedEntryRow[] {
+function snapshotStoredEntry(entry: StoredEntryRow): Record<string, string | number> {
+    return {
+        id: entry.id,
+        source_text: entry.source_text,
+        normalized_source: entry.normalized_source,
+        translated_text: entry.translated_text,
+        source_language: entry.source_language,
+        target_language: entry.target_language,
+        first_seen_at_ms: toEpochMilliseconds(entry.first_seen_at_ms),
+        last_used_at_ms: toEpochMilliseconds(entry.last_used_at_ms),
+        context: entry.context,
+        quiz_interval_days: entry.quiz_interval_days,
+        next_due_at_ms: toEpochMilliseconds(entry.next_due_at_ms)
+    };
+}
+
+function mergeStoredEntries(entries: StoredEntryRow[]): MergedEntryGroup[] {
     const merged = new Map<string, {
         candidates: StoredEntryRow[];
         entry: StoredEntryRow;
@@ -259,29 +292,37 @@ function mergeStoredEntries(entries: StoredEntryRow[]): MergedEntryRow[] {
             toEpochMilliseconds(candidate.last_used_at_ms)
         )));
         return {
-            id: entry.id,
-            source_text: entry.source_text.trim(),
-            normalized_source: normalizeSource(entry.source_text),
-            translated_text: entry.translated_text,
-            source_language: normalizeLanguage(entry.source_language, 'unknown'),
-            target_language: normalizeLanguage(entry.target_language, 'unknown'),
-            first_seen_at_ms: firstSeenAtMs,
-            last_used_at_ms: lastUsedAtMs,
-            context: entry.context,
-            quiz_interval_days: entry.quiz_interval_days,
-            next_due_at_ms: toEpochMilliseconds(entry.next_due_at_ms)
+            candidates: [...candidates].sort((left, right) => left.id.localeCompare(right.id)),
+            entry: {
+                id: entry.id,
+                source_text: entry.source_text.trim(),
+                normalized_source: normalizeSource(entry.source_text),
+                translated_text: entry.translated_text,
+                source_language: normalizeLanguage(entry.source_language, 'unknown'),
+                target_language: normalizeLanguage(entry.target_language, 'unknown'),
+                first_seen_at_ms: firstSeenAtMs,
+                last_used_at_ms: lastUsedAtMs,
+                context: entry.context,
+                quiz_interval_days: entry.quiz_interval_days,
+                next_due_at_ms: toEpochMilliseconds(entry.next_due_at_ms)
+            }
         };
     });
 }
 
-function reconcileStoredEntries(database: DatabaseType, now: string): void {
+function reconcileStoredEntries(
+    database: DatabaseType,
+    now: string,
+    migrationVersions: number[]
+): void {
     const entries = database.prepare(
         'SELECT * FROM entries ORDER BY id'
     ).all() as StoredEntryRow[];
     const occurrences = database.prepare(
         'SELECT * FROM occurrences ORDER BY id'
     ).all() as StoredOccurrenceRow[];
-    const mergedEntries = mergeStoredEntries(entries);
+    const mergedGroups = mergeStoredEntries(entries);
+    const mergedEntries = mergedGroups.map((group) => group.entry);
     const entryIdentityById = new Map(
         entries.map((entry) => [entry.id, mergedIdentity(entry)])
     );
@@ -298,6 +339,35 @@ function reconcileStoredEntries(database: DatabaseType, now: string): void {
     database.pragma('foreign_keys = OFF');
     try {
         database.transaction(() => {
+            database.exec(`
+                CREATE TABLE IF NOT EXISTS entry_merge_history (
+                    identity TEXT NOT NULL,
+                    selected_entry_id TEXT NOT NULL,
+                    entry_id TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    merged_at TEXT NOT NULL,
+                    PRIMARY KEY(identity, entry_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_entry_merge_history_selected
+                    ON entry_merge_history(selected_entry_id);
+            `);
+            const insertHistory = database.prepare(`
+                INSERT OR IGNORE INTO entry_merge_history (
+                    identity, selected_entry_id, entry_id, snapshot_json, merged_at
+                ) VALUES (?, ?, ?, ?, ?)
+            `);
+            for (const group of mergedGroups) {
+                const identity = mergedIdentity(group.candidates[0]);
+                for (const candidate of group.candidates) {
+                    insertHistory.run(
+                        identity,
+                        group.entry.id,
+                        candidate.id,
+                        JSON.stringify(snapshotStoredEntry(candidate)),
+                        now
+                    );
+                }
+            }
             database.exec('DROP TABLE occurrences; DROP TABLE entries;');
             createEpochSchema(database);
             const insertEntry = database.prepare(`
@@ -355,9 +425,11 @@ function reconcileStoredEntries(database: DatabaseType, now: string): void {
                 seenOccurrences.add(occurrenceKey);
                 insertOccurrence.run(entry.id, occurrence.task_id, occurredAtMs);
             }
-            database.prepare(
-                'INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)'
-            ).run(now);
+            const insertMigration = database.prepare(
+                'INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)'
+            );
+            for (const version of migrationVersions)
+                insertMigration.run(version, now);
         })();
     } finally {
         database.pragma('foreign_keys = ON');
@@ -427,8 +499,13 @@ function migrate(database: DatabaseType, now: string): void {
             database.pragma('foreign_keys = ON');
         }
     }
-    if (current.version < 3)
-        reconcileStoredEntries(database, now);
+    if (current.version < 4) {
+        reconcileStoredEntries(
+            database,
+            now,
+            current.version < 3 ? [3, 4] : [4]
+        );
+    }
     database.pragma('foreign_keys = ON');
 }
 
@@ -444,7 +521,8 @@ function writeRecord(
     task: TranslationTask,
     recordedAtMs: number
 ): void {
-    const normalizedSource = normalizeSource(task.sourceText);
+    const sourceText = validateVocabularySourceText(task.sourceText);
+    const normalizedSource = normalizeSource(sourceText);
     const sourceLanguage = normalizeLanguage(task.sourceLanguage, 'unknown');
     const targetLanguage = normalizeLanguage(task.targetLanguage, 'unknown');
     const identity = database.prepare(`
@@ -470,7 +548,7 @@ function writeRecord(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         `).run(
             id,
-            task.sourceText.trim(),
+            sourceText,
             normalizedSource,
             task.translatedText,
             sourceLanguage,
@@ -685,7 +763,9 @@ function updateEntry(
     } | undefined;
     if (row === undefined)
         return false;
-    const sourceText = patch.sourceText ?? row.source_text;
+    const sourceText = patch.sourceText === undefined
+        ? row.source_text
+        : validateVocabularySourceText(patch.sourceText);
     const normalizedSource = normalizeSource(sourceText);
     const translatedText = patch.translatedText ?? row.translated_text;
     const sourceLanguage = normalizeLanguage(patch.sourceLanguage ?? row.source_language, 'unknown');
