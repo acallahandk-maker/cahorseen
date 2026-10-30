@@ -16,7 +16,10 @@ import {
     type MemoryPersistenceStatus,
     type TranslationTask
 } from '../../shared/contracts';
-import { validateVocabularySourceText } from '../../shared/vocabularyText';
+import {
+    VocabularyTextValidationError,
+    validateVocabularySourceText
+} from '../../shared/vocabularyText';
 
 const timestampSchema = z.string().datetime({ offset: true });
 const nonEmptyString = z.string().min(1);
@@ -340,8 +343,14 @@ export class MemoryDatabase {
             throw new MemoryDatabaseError('invalid-request', 'Only completed translation tasks can be recorded.');
         try {
             validateVocabularySourceText(parsed.data.sourceText);
-        } catch {
-            throw new MemoryDatabaseError('invalid-request', 'Vocabulary source text is not safe OCR text.');
+        } catch (error) {
+            const reason = error instanceof VocabularyTextValidationError
+                ? ` (${error.reason})`
+                : '';
+            throw new MemoryDatabaseError(
+                'invalid-request',
+                `Vocabulary source text is not safe OCR text${reason}.`
+            );
         }
         const recordedAtMs = toEpochMilliseconds(this.now());
         if (this.outstandingRecordCount >= this.maxQueuedRecords)

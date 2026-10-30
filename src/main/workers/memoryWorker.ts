@@ -12,7 +12,10 @@ import {
     memoryWorkerRequestSchema,
     type MemoryWorkerRequest
 } from '../services/memoryDatabase';
-import { validateVocabularySourceText } from '../../shared/vocabularyText';
+import {
+    VocabularyTextValidationError,
+    validateVocabularySourceText
+} from '../../shared/vocabularyText';
 
 const databaseOptionsSchema = z.strictObject({
     databasePath: z.string().min(1)
@@ -150,9 +153,9 @@ function isUniqueConstraint(error: unknown): boolean {
 
 function isInputError(error: unknown): boolean {
     return error instanceof Error
-        && (error.message === 'invalid timestamp'
-            || error.message === 'source text must contain non-whitespace characters'
-            || error.message === 'invalid vocabulary source text');
+        && (error instanceof VocabularyTextValidationError
+            || error.message === 'invalid timestamp'
+            || error.message === 'source text must contain non-whitespace characters');
 }
 
 function createLegacySchema(database: DatabaseType, now: string): void {

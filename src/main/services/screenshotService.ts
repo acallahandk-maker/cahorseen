@@ -14,7 +14,10 @@ import {
     type TranslationErrorCode,
     type TranslationTask
 } from '../../shared/contracts';
-import { validateVocabularySourceText } from '../../shared/vocabularyText';
+import {
+    VocabularyTextValidationError,
+    validateVocabularySourceText
+} from '../../shared/vocabularyText';
 import {
     ProviderError,
     providerErrorMessage
@@ -565,10 +568,13 @@ export class ScreenshotService {
             let sourceText: string;
             try {
                 sourceText = validateVocabularySourceText(memorySourceText ?? '');
-            } catch {
+            } catch (error) {
+                const reason = error instanceof VocabularyTextValidationError
+                    ? ` (${error.reason})`
+                    : '';
                 const status = memoryFailureStatus(new MemoryDatabaseError(
                     'invalid-request',
-                    'Screenshot memory requires useful source text.'
+                    `Screenshot memory requires useful source text${reason}.`
                 ));
                 this.notifyMemoryStatus(status);
                 return { ...task, memoryStatus: status };

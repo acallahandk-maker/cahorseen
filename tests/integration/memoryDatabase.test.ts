@@ -329,8 +329,14 @@ describe('MemoryDatabase', () => {
 
     it.each([
         ['data URL', 'data:image/png;base64,AAAA'],
+        ['MIME-less data URL', 'data:,AAAA'],
+        ['case and whitespace varied data URL', ' DaTa : , AAAA '],
         ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
-        ['capture placeholder', 'Screenshot region']
+        ['base64 fragment', 'base64,AAAA'],
+        ['capture placeholder', 'Screenshot region:'],
+        ['punctuation-wrapped placeholder', '[SCREENSHOT REGION]!'],
+        ['short padded encoded token', 'QUJDRA=='],
+        ['long unspaced payload', 'A'.repeat(80)]
     ])('rejects %s before queueing memory records', async (_kind, sourceText) => {
         const { database } = await createMemory();
         await expect(database.recordTranslation(completedTask({
@@ -340,14 +346,19 @@ describe('MemoryDatabase', () => {
         await expect(database.listEntries()).resolves.toEqual([]);
     });
 
-    it('rejects capture payloads when updating an entry at the worker boundary', async () => {
+    it.each([
+        ['MIME-less data URL', 'data:,AAAA'],
+        ['capture placeholder', 'Screenshot region:'],
+        ['short padded encoded token', 'QUJDRA=='],
+        ['long unspaced payload', 'A'.repeat(80)]
+    ])('rejects %s when updating an entry at the worker boundary', async (_kind, sourceText) => {
         const { database } = await createMemory();
         await database.recordTranslation(completedTask());
         const [entry] = await database.listEntries();
         if (entry === undefined)
             throw new Error('Expected an entry to update.');
         await expect(database.updateEntry(entry.id, {
-            sourceText: 'data:image/png;base64,AAAA'
+            sourceText
         })).rejects.toMatchObject({ code: 'invalid-request' });
         await expect(database.listEntries()).resolves.toMatchObject([{
             id: entry.id,

@@ -204,9 +204,15 @@ describe('production memory recording', () => {
 
     it.each([
         ['data URL', 'data:image/png;base64,AAAA'],
+        ['MIME-less data URL', 'data:,AAAA'],
+        ['case and whitespace varied data URL', ' DaTa : , AAAA '],
         ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
-        ['capture placeholder', 'Screenshot region']
-    ])('rejects %s at the recording boundary', async (_kind, sourceText) => {
+        ['base64 fragment', 'base64,AAAA'],
+        ['capture placeholder', 'Screenshot region:'],
+        ['punctuation-wrapped placeholder', '[SCREENSHOT REGION]!'],
+        ['short padded encoded token', 'QUJDRA=='],
+        ['long unspaced payload', 'A'.repeat(80)]
+    ])('rejects %s before memory recording', async (_kind, sourceText) => {
         const recordTranslation = vi.fn(async () => undefined);
         const service = new ScreenshotService({
             captureAdapter: screenshotAdapter(),
