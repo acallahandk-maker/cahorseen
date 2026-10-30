@@ -219,10 +219,16 @@ describe('OpenAI-compatible translation client', () => {
         ['data URL', 'data:image/png;base64,AAAA'],
         ['MIME-less data URL', 'data:,AAAA'],
         ['case and whitespace varied data URL', ' DaTa : , AAAA '],
+        ['base64 data URL', 'data:;base64,QUJDRA=='],
         ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
         ['base64 fragment', 'base64,AAAA'],
         ['capture placeholder', 'Screenshot region:'],
         ['punctuation-wrapped placeholder', '[SCREENSHOT REGION]!'],
+        ['redacted capture placeholder', 'Screenshot region (redacted)'],
+        [
+            'standard base64 wrapped across 16-character chunks',
+            'ZGF0YTosQUFBQUFB QUFBQUFBQUFBQUFB QUFBQUFBQUFBQUFB'
+        ],
         ['short padded encoded token', 'QUJDRA=='],
         ['long unspaced payload', 'A'.repeat(80)]
     ])('rejects %s before exposing structured image results', async (_kind, sourceText) => {
@@ -253,13 +259,20 @@ describe('OpenAI-compatible translation client', () => {
         })).rejects.toMatchObject({ code: 'invalid-response' });
     });
 
-    it('accepts ordinary multilingual OCR source text', async () => {
+    it.each([
+        ['multilingual OCR', 'Café — 你好，¿qué tal?\nLine 2.'],
+        ['technical MIME text', 'text/plain, UTF-8'],
+        [
+            'long natural-language sentence with short words',
+            'Please bring the signed application form to the reception desk before Friday morning today.'
+        ]
+    ])('accepts %s as structured image source text', async (_kind, sourceText) => {
         const client = new OpenAiClient({
             fetchImpl: async () => jsonResponse({
                 choices: [{
                     message: {
                         content: JSON.stringify({
-                            sourceText: 'Café — 你好，¿qué tal?\nLine 2.',
+                            sourceText,
                             translatedText: 'Hello world'
                         })
                     }
@@ -279,7 +292,7 @@ describe('OpenAI-compatible translation client', () => {
             targetLanguage: 'en',
             structuredResponse: true
         })).resolves.toMatchObject({
-            sourceText: 'Café — 你好，¿qué tal?\nLine 2.'
+            sourceText
         });
     });
 

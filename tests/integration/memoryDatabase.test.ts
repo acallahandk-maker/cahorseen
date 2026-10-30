@@ -331,10 +331,16 @@ describe('MemoryDatabase', () => {
         ['data URL', 'data:image/png;base64,AAAA'],
         ['MIME-less data URL', 'data:,AAAA'],
         ['case and whitespace varied data URL', ' DaTa : , AAAA '],
+        ['base64 data URL', 'data:;base64,QUJDRA=='],
         ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
         ['base64 fragment', 'base64,AAAA'],
         ['capture placeholder', 'Screenshot region:'],
         ['punctuation-wrapped placeholder', '[SCREENSHOT REGION]!'],
+        ['redacted capture placeholder', 'Screenshot region (redacted)'],
+        [
+            'standard base64 wrapped across 16-character chunks',
+            'ZGF0YTosQUFBQUFB QUFBQUFBQUFBQUFB QUFBQUFBQUFBQUFB'
+        ],
         ['short padded encoded token', 'QUJDRA=='],
         ['long unspaced payload', 'A'.repeat(80)]
     ])('rejects %s before queueing memory records', async (_kind, sourceText) => {
@@ -344,6 +350,23 @@ describe('MemoryDatabase', () => {
             sourceText
         }))).rejects.toMatchObject({ code: 'invalid-request' });
         await expect(database.listEntries()).resolves.toEqual([]);
+    });
+
+    it.each([
+        ['technical MIME text', 'text/plain, UTF-8'],
+        [
+            'long natural-language sentence with short words',
+            'Please bring the signed application form to the reception desk before Friday morning today.'
+        ]
+    ])('queues %s from ordinary OCR', async (_kind, sourceText) => {
+        const { database } = await createMemory();
+        await database.recordTranslation(completedTask({
+            id: 'ordinary-ocr',
+            sourceText
+        }));
+        await expect(database.listEntries()).resolves.toMatchObject([{
+            sourceText
+        }]);
     });
 
     it.each([

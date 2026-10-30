@@ -206,10 +206,16 @@ describe('production memory recording', () => {
         ['data URL', 'data:image/png;base64,AAAA'],
         ['MIME-less data URL', 'data:,AAAA'],
         ['case and whitespace varied data URL', ' DaTa : , AAAA '],
+        ['base64 data URL', 'data:;base64,QUJDRA=='],
         ['base64 payload', 'QmFzZTY0UGF5bG9hZEJhc2U2NFBheWxvYWRCYXNlNjRQYXlsb2FkQmFzZTY0UGF5bG9hZA=='],
         ['base64 fragment', 'base64,AAAA'],
         ['capture placeholder', 'Screenshot region:'],
         ['punctuation-wrapped placeholder', '[SCREENSHOT REGION]!'],
+        ['redacted capture placeholder', 'Screenshot region (redacted)'],
+        [
+            'standard base64 wrapped across 16-character chunks',
+            'ZGF0YTosQUFBQUFB QUFBQUFBQUFBQUFB QUFBQUFBQUFBQUFB'
+        ],
         ['short padded encoded token', 'QUJDRA=='],
         ['long unspaced payload', 'A'.repeat(80)]
     ])('rejects %s before memory recording', async (_kind, sourceText) => {
@@ -245,6 +251,45 @@ describe('production memory recording', () => {
             recoverable: true
         });
         expect(recordTranslation).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['technical MIME text', 'text/plain, UTF-8'],
+        [
+            'long natural-language sentence with short words',
+            'Please bring the signed application form to the reception desk before Friday morning today.'
+        ]
+    ])('records %s from ordinary OCR', async (_kind, sourceText) => {
+        const recordTranslation = vi.fn(async () => undefined);
+        const service = new ScreenshotService({
+            captureAdapter: screenshotAdapter(),
+            translationRunner: {
+                runImage: async (): Promise<TranslationResult> => ({
+                    sourceText,
+                    translatedText: 'Traduit',
+                    model: 'vision-model'
+                })
+            },
+            getProvider: async () => provider,
+            getDisplays: () => [{ x: 0, y: 0, width: 100, height: 100 }],
+            mapBoundsToCapturePixels: (_displayIndex, bounds) => bounds,
+            recordTranslation
+        });
+
+        const completed = await service.translateScreenshot({
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 10
+        }, {
+            targetLanguage: 'fr-FR'
+        });
+
+        expect(completed.status).toBe('completed');
+        expect(completed.memoryStatus).toBeUndefined();
+        expect(recordTranslation).toHaveBeenCalledWith(expect.objectContaining({
+            sourceText
+        }));
     });
 
     it('reports nonfatal memory persistence errors without failing translation', async () => {
