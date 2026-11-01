@@ -14,7 +14,7 @@
     "prebuild": "node scripts/provision-live2d-assets.mjs",
     "predev": "node scripts/provision-live2d-assets.mjs",
     "start": "electron-vite preview",
-    "test": "npm run build && vitest run",
+    "test": "npm run build && vitest run --maxWorkers=1",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {

@@ -8,6 +8,10 @@ import {
     type ProviderSummary,
     type SettingsPreferences
 } from '../../shared/contracts';
+import {
+    VocabularyHeatView,
+    type VocabularyHeatViewProps
+} from '../learning/VocabularyHeatView';
 
 export interface SettingsError {
     code: string;
@@ -35,6 +39,7 @@ export interface SettingsWindowProps {
     onSavePreferences?: (preferences: SettingsPreferences) => Promise<unknown> | void;
     onLoadProviderDetails?: (providerId: string) => Promise<ProviderDetails>;
     onReloadState?: () => Promise<SettingsStateSnapshot>;
+    vocabulary?: VocabularyHeatViewProps;
 }
 
 interface SettingsDesktopPetApi {
@@ -192,7 +197,8 @@ export default function SettingsWindow({
     onTestProvider,
     onSavePreferences,
     onLoadProviderDetails,
-    onReloadState
+    onReloadState,
+    vocabulary
 }: SettingsWindowProps): React.JSX.Element {
     const desktopPet = getDesktopPetApi();
     const [providers, setProviders] = useState<ProviderSummary[]>(providedProviders ?? []);
@@ -703,6 +709,15 @@ export default function SettingsWindow({
                     Save preferences
                 </button>
             </section>
+            {vocabulary === undefined ? null : (
+                <section aria-label="Vocabulary history and heat">
+                    <h2>Vocabulary history &amp; heat</h2>
+                    <VocabularyHeatView
+                        {...vocabulary}
+                        privacyLocalOnly={preferences.privacy.localOnly}
+                    />
+                </section>
+            )}
         </main>
     );
 }
