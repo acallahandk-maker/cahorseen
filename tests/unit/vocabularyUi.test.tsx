@@ -131,6 +131,14 @@ function repositoryFixture(overrides: Partial<VocabularyRepositoryFacade> = {}):
     };
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((settle) => {
+        resolve = settle;
+    });
+    return { promise, resolve };
+}
+
 afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
@@ -470,6 +478,97 @@ describe('VocabularyHeatView', () => {
         ).toHaveProperty('checked', true));
         expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
             .toContain('Vocabulary memory paused');
+    });
+
+    it('ignores stale memory state after a successful pause toggle', async () => {
+        const user = userEvent.setup();
+        const staleMemoryState = deferred<boolean>();
+        const getMemoryEnabled = vi.fn()
+            .mockResolvedValueOnce(true)
+            .mockImplementationOnce(() => staleMemoryState.promise);
+        const setMemoryEnabled = vi.fn(async () => undefined);
+        render(
+            <VocabularyHeatView
+                statistics={statisticsFixture()}
+                entries={entriesFixture()}
+                now={now}
+                repository={repositoryFixture({ getMemoryEnabled, setMemoryEnabled })}
+            />
+        );
+
+        await screen.findByRole('button', { name: 'Delete Alpha source' });
+        await user.click(screen.getByRole('button', { name: '7 days' }));
+        await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(2));
+        await user.click(screen.getByLabelText('Pause vocabulary memory'));
+        await waitFor(() => expect(setMemoryEnabled).toHaveBeenCalledWith(false));
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory paused');
+
+        staleMemoryState.resolve(true);
+        await staleMemoryState.promise;
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory paused');
+    });
+
+    it('keeps failed pause rollback when stale memory state resolves later', async () => {
+        const user = userEvent.setup();
+        const staleMemoryState = deferred<boolean>();
+        const getMemoryEnabled = vi.fn()
+            .mockResolvedValueOnce(true)
+            .mockImplementationOnce(() => staleMemoryState.promise);
+        const repository = repositoryFixture({
+            getMemoryEnabled,
+            setMemoryEnabled: vi.fn(async () => {
+                throw new Error('Pause failed.');
+            })
+        });
+        render(
+            <VocabularyHeatView
+                statistics={statisticsFixture()}
+                entries={entriesFixture()}
+                now={now}
+                repository={repository}
+            />
+        );
+
+        await screen.findByRole('button', { name: 'Delete Alpha source' });
+        await user.click(screen.getByRole('button', { name: '7 days' }));
+        await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(2));
+        await user.click(screen.getByLabelText('Pause vocabulary memory'));
+        await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Pause failed.'));
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', false);
+
+        staleMemoryState.resolve(false);
+        await staleMemoryState.promise;
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', false);
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory active');
+    });
+
+    it('discards stale memory state after unmount', async () => {
+        const user = userEvent.setup();
+        const staleMemoryState = deferred<boolean>();
+        const getMemoryEnabled = vi.fn()
+            .mockResolvedValueOnce(true)
+            .mockImplementationOnce(() => staleMemoryState.promise);
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const view = render(
+            <VocabularyHeatView
+                statistics={statisticsFixture()}
+                entries={entriesFixture()}
+                now={now}
+                repository={repositoryFixture({ getMemoryEnabled })}
+            />
+        );
+
+        await screen.findByRole('button', { name: 'Delete Alpha source' });
+        await user.click(screen.getByRole('button', { name: '7 days' }));
+        await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(2));
+        view.unmount();
+        staleMemoryState.resolve(false);
+        await staleMemoryState.promise;
+        expect(consoleError).not.toHaveBeenCalled();
     });
 
     it('virtualizes long rows while preserving accessible table positions', () => {

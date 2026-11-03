@@ -294,6 +294,7 @@ export function VocabularyHeatView({
     ).current;
     const mountedRef = useRef(true);
     const requestGeneration = useRef(0);
+    const memoryStateGeneration = useRef(0);
     const dialogGeneration = useRef(0);
     const searchInteractedRef = useRef(false);
     const actionsRef = useRef(actions);
@@ -369,6 +370,7 @@ export function VocabularyHeatView({
     ): Promise<void> => {
         if (repository === undefined)
             return;
+        const memoryStateVersion = memoryStateGeneration.current;
         const from = rangeFrom(filter.range, stableNowMs);
         const common = {
             ...(filter.sourceLanguage.length === 0
@@ -393,7 +395,8 @@ export function VocabularyHeatView({
                 return;
             setRepositoryStatistics(nextStatistics);
             setRepositoryEntries(nextEntries);
-            setMemoryPaused(!memoryEnabled);
+            if (memoryStateVersion === memoryStateGeneration.current)
+                setMemoryPaused(!memoryEnabled);
         } catch (error) {
             if (mountedRef.current && generation === requestGeneration.current)
                 setActionError(errorMessage(error, 'Vocabulary data could not be loaded.'));
@@ -420,6 +423,7 @@ export function VocabularyHeatView({
         return () => {
             mountedRef.current = false;
             requestGeneration.current += 1;
+            memoryStateGeneration.current += 1;
             dialogGeneration.current += 1;
         };
     }, []);
@@ -564,6 +568,7 @@ export function VocabularyHeatView({
         if (pendingAction !== undefined)
             return;
         const previous = memoryPaused;
+        memoryStateGeneration.current += 1;
         setMemoryPaused(paused);
         setPendingAction('pause');
         setActionError(undefined);
@@ -578,6 +583,7 @@ export function VocabularyHeatView({
                 setActionError(errorMessage(error, 'Vocabulary memory setting failed.'));
             }
         } finally {
+            memoryStateGeneration.current += 1;
             if (mountedRef.current)
                 setPendingAction(undefined);
         }
