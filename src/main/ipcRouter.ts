@@ -10,6 +10,7 @@ import {
     memoryEntryQuerySchema,
     memoryEntrySchema,
     memoryExportFormatSchema,
+    memoryErrorCodeSchema,
     memoryFilterSchema,
     memoryIpcChannels,
     providerDetailsSchema,
@@ -25,6 +26,7 @@ import {
     settingsStateSchema,
     detectSourceLanguage,
     translationCancelSchema,
+    translationErrorCodeSchema,
     translationEventSchema,
     translationIpcChannels,
     translationStartSchema,
@@ -36,6 +38,7 @@ import {
     type ProviderSummary,
     type ScreenBounds,
     type SelectionCapture,
+    type MemoryErrorCode,
     type VocabularyRepositoryFacade,
     type SettingsPreferences,
     type SettingsState,
@@ -110,7 +113,7 @@ type IpcFailure = {
             | 'unauthorized'
             | 'invalid-request'
             | 'request-failed'
-            | 'export-too-large'
+            | MemoryErrorCode
             | ProviderErrorCode
             | TranslationError['code'];
         message: string;
@@ -207,10 +210,33 @@ function safeFailure(error: unknown): IpcFailure {
     return failure('request-failed', 'Provider request failed.');
 }
 
+const memoryFailureMessages: Record<MemoryErrorCode, string> = {
+    busy: 'Translation memory is busy.',
+    conflict: 'Vocabulary entry conflicts with existing data.',
+    'export-too-large': `Vocabulary export exceeds the ${MAX_VOCABULARY_EXPORT_CHARS.toLocaleString()} character limit.`,
+    internal: 'Vocabulary operation failed.',
+    'invalid-request': 'Vocabulary request is invalid.',
+    'not-found': 'Vocabulary entry was not found.',
+    storage: 'Vocabulary storage failed.',
+    timeout: 'Vocabulary request timed out.',
+    worker: 'Vocabulary worker failed.'
+};
+
+function safeMemoryFailure(error: unknown): IpcFailure {
+    const code = error instanceof Error
+        ? (error as Error & { code?: unknown }).code
+        : undefined;
+    const parsedCode = memoryErrorCodeSchema.safeParse(code);
+    if (parsedCode.success)
+        return failure(parsedCode.data, memoryFailureMessages[parsedCode.data]);
+    return failure('request-failed', 'Vocabulary request failed.');
+}
+
 function translationTaskErrorCode(
     code: IpcFailure['error']['code']
 ): TranslationError['code'] {
-    return code === 'export-too-large' ? 'request-failed' : code;
+    const parsed = translationErrorCodeSchema.safeParse(code);
+    return parsed.success ? parsed.data : 'request-failed';
 }
 
 function safeSelectionFailure(error: unknown): IpcFailure {
@@ -564,7 +590,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     )
                 } satisfies IpcSuccess<unknown>;
             } catch (error) {
-                return safeFailure(error);
+                return safeMemoryFailure(error);
             }
         });
 
@@ -582,7 +608,22 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                     )
                 } satisfies IpcSuccess<unknown>;
             } catch (error) {
-                return safeFailure(error);
+                return safeMemoryFailure(error);
+            }
+        });
+
+        ipcMain.handle(memoryIpcChannels.getMemoryEnabled, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            if (payload !== undefined && !emptyPayloadSchema.safeParse(payload).success)
+                return failure('invalid-request', 'Vocabulary memory state request is invalid.');
+            try {
+                return {
+                    ok: true,
+                    value: z.boolean().parse(await memory.getMemoryEnabled())
+                } satisfies IpcSuccess<boolean>;
+            } catch (error) {
+                return safeMemoryFailure(error);
             }
         });
 
@@ -596,7 +637,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 await memory.updateEntry(parsed.data.id, parsed.data.patch);
                 return { ok: true } satisfies IpcSaveSuccess;
             } catch (error) {
-                return safeFailure(error);
+                return safeMemoryFailure(error);
             }
         });
 
@@ -610,7 +651,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 await memory.deleteEntries(parsed.data.ids);
                 return { ok: true } satisfies IpcSaveSuccess;
             } catch (error) {
-                return safeFailure(error);
+                return safeMemoryFailure(error);
             }
         });
 
@@ -630,7 +671,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 }
                 return { ok: true, value } satisfies IpcSuccess<string>;
             } catch (error) {
-                return safeFailure(error);
+                return safeMemoryFailure(error);
             }
         });
 
@@ -644,7 +685,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 await memory.setMemoryEnabled(parsed.data.enabled);
                 return { ok: true } satisfies IpcSaveSuccess;
             } catch (error) {
-                return safeFailure(error);
+                return safeMemoryFailure(error);
             }
         });
     }
@@ -878,6 +919,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         ipcMain.removeHandler(settingsIpcChannels.open);
         ipcMain.removeHandler(memoryIpcChannels.queryHeat);
         ipcMain.removeHandler(memoryIpcChannels.listEntries);
+        ipcMain.removeHandler(memoryIpcChannels.getMemoryEnabled);
         ipcMain.removeHandler(memoryIpcChannels.updateEntry);
         ipcMain.removeHandler(memoryIpcChannels.deleteEntries);
         ipcMain.removeHandler(memoryIpcChannels.exportEntries);

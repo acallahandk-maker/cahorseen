@@ -722,10 +722,7 @@ export default function SettingsWindow({
                         actions={vocabulary?.actions}
                         virtualization={vocabulary?.virtualization}
                         repository={vocabularyRepository ?? vocabulary?.repository}
-                        memoryPaused={
-                            vocabulary?.memoryPaused
-                            ?? !preferences.privacy.saveTranslationHistory
-                        }
+                        memoryPaused={vocabulary?.memoryPaused}
                         privacyLocalOnly={preferences.privacy.localOnly}
                     />
                 </section>

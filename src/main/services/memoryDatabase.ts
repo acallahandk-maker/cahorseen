@@ -12,12 +12,14 @@ import {
     memoryEntryQuerySchema,
     memoryFilterSchema,
     memoryEntrySchema,
+    memoryErrorCodeSchema,
     memoryPersistenceStatusSchema,
     translationTaskSchema,
     type HeatStatistic,
     type MemoryEntry,
     type MemoryEntryPatch,
     type MemoryEntryQuery,
+    type MemoryErrorCode,
     type MemoryFilter,
     type MemoryPersistenceStatus,
     type TranslationTask
@@ -32,20 +34,11 @@ const positiveInteger = z.number().int().positive();
 const epochMilliseconds = z.number().int();
 
 const memoryErrorSchema = z.strictObject({
-    code: z.enum([
-        'busy',
-        'conflict',
-        'internal',
-        'invalid-request',
-        'not-found',
-        'storage',
-        'timeout',
-        'worker'
-    ]),
+    code: memoryErrorCodeSchema,
     message: z.string().max(500)
 });
 
-export type MemoryErrorCode = z.infer<typeof memoryErrorSchema>['code'];
+export type { MemoryErrorCode };
 
 export class MemoryDatabaseError extends Error {
     readonly code: MemoryErrorCode;
@@ -125,6 +118,10 @@ export const memoryWorkerRequestSchema = z.discriminatedUnion('operation', [
     }),
     z.strictObject({
         requestId: nonEmptyString,
+        operation: z.literal('getMemoryEnabled')
+    }),
+    z.strictObject({
+        requestId: nonEmptyString,
         operation: z.literal('updateEntry'),
         id: nonEmptyString,
         patch: workerEntryPatchSchema
@@ -171,6 +168,12 @@ export const memoryWorkerResponseSchema = z.union([
         ok: z.literal(true),
         operation: z.literal('listEntries'),
         result: z.strictObject({ entries: z.array(memoryEntrySchema) })
+    }),
+    z.strictObject({
+        requestId: nonEmptyString,
+        ok: z.literal(true),
+        operation: z.literal('getMemoryEnabled'),
+        result: z.strictObject({ enabled: z.boolean() })
     }),
     z.strictObject({
         requestId: nonEmptyString,
@@ -373,6 +376,17 @@ export class MemoryDatabase {
         if (response.operation !== 'listEntries')
             throw new MemoryDatabaseError('internal', 'The memory worker returned the wrong result.');
         return response.result.entries;
+    }
+
+    async getMemoryEnabled(): Promise<boolean> {
+        const request: MemoryWorkerRequest = {
+            requestId: randomUUID(),
+            operation: 'getMemoryEnabled'
+        };
+        const response = await this.send(request);
+        if (response.operation !== 'getMemoryEnabled')
+            throw new MemoryDatabaseError('internal', 'The memory worker returned the wrong result.');
+        return response.result.enabled;
     }
 
     async updateEntry(id: string, patch: MemoryEntryPatch): Promise<void> {
@@ -607,6 +621,10 @@ export async function queryHeat(filter?: MemoryFilter): Promise<HeatStatistic[]>
 
 export async function listEntries(query?: MemoryEntryQuery): Promise<MemoryEntry[]> {
     return (await getDefaultDatabase()).listEntries(query);
+}
+
+export async function getMemoryEnabled(): Promise<boolean> {
+    return (await getDefaultDatabase()).getMemoryEnabled();
 }
 
 export async function updateEntry(id: string, patch: MemoryEntryPatch): Promise<void> {

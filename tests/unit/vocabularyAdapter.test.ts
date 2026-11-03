@@ -43,6 +43,8 @@ describe('vocabulary preload adapter', () => {
                 return success([]);
             if (channel === memoryIpcChannels.listEntries)
                 return success([makeEntry()]);
+            if (channel === memoryIpcChannels.getMemoryEnabled)
+                return success(false);
             return { ok: true };
         });
         const api = createVocabularyApi(invoke);
@@ -70,6 +72,7 @@ describe('vocabulary preload adapter', () => {
         await api.listEntries(query);
         await api.updateEntry('entry-1', patch);
         await api.deleteEntries(['entry-1']);
+        await expect(api.getMemoryEnabled()).resolves.toBe(false);
         await api.setMemoryEnabled(false);
 
         expect(invoke.mock.calls).toEqual([
@@ -77,6 +80,7 @@ describe('vocabulary preload adapter', () => {
             [memoryIpcChannels.listEntries, query],
             [memoryIpcChannels.updateEntry, { id: 'entry-1', patch }],
             [memoryIpcChannels.deleteEntries, { ids: ['entry-1'] }],
+            [memoryIpcChannels.getMemoryEnabled, undefined],
             [memoryIpcChannels.setMemoryEnabled, { enabled: false }]
         ]);
     });

@@ -67,6 +67,10 @@ export function createVocabularyApi(
                 memoryEntryQuerySchema.parse(query)
             )
         ),
+        getMemoryEnabled: async () => parseIpcResult(
+            z.boolean(),
+            await invoke(memoryIpcChannels.getMemoryEnabled, undefined)
+        ),
         updateEntry: async (id: string, patch: MemoryEntryPatch) => {
             const request = updatePayloadSchema.parse({ id, patch });
             parseIpcAck(await invoke(memoryIpcChannels.updateEntry, request));

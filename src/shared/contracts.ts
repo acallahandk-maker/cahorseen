@@ -195,24 +195,27 @@ export const memoryEntryPatchSchema = z.strictObject({
 });
 
 export const memoryExportFormatSchema = z.enum(['json', 'csv']);
+export const memoryErrorCodeSchema = z.enum([
+    'busy',
+    'conflict',
+    'export-too-large',
+    'internal',
+    'invalid-request',
+    'not-found',
+    'storage',
+    'timeout',
+    'worker'
+]);
 
 export type MemoryFilter = z.infer<typeof memoryFilterSchema>;
 export type MemoryEntryQuery = z.infer<typeof memoryEntryQuerySchema>;
 export type MemoryEntryPatch = z.infer<typeof memoryEntryPatchSchema>;
 export type MemoryExportFormat = z.infer<typeof memoryExportFormatSchema>;
+export type MemoryErrorCode = z.infer<typeof memoryErrorCodeSchema>;
 
 export const memoryPersistenceStatusSchema = z.strictObject({
     state: z.enum(['recorded', 'failed']),
-    code: z.enum([
-        'busy',
-        'conflict',
-        'internal',
-        'invalid-request',
-        'not-found',
-        'storage',
-        'timeout',
-        'worker'
-    ]).optional(),
+    code: memoryErrorCodeSchema.optional(),
     recoverable: z.literal(true),
     message: z.string().min(1).max(500)
 }).superRefine((status, context) => {
@@ -460,6 +463,7 @@ export const settingsIpcChannels = {
 export const memoryIpcChannels = {
     queryHeat: 'desktop-pet:memory-query-heat',
     listEntries: 'desktop-pet:memory-list-entries',
+    getMemoryEnabled: 'desktop-pet:memory-get-enabled',
     updateEntry: 'desktop-pet:memory-update-entry',
     deleteEntries: 'desktop-pet:memory-delete-entries',
     exportEntries: 'desktop-pet:memory-export-entries',
@@ -643,6 +647,7 @@ export type SettingsState = z.infer<typeof settingsStateSchema>;
 export interface VocabularyRepositoryFacade {
     queryHeat(filter?: MemoryFilter): Promise<HeatStatistic[]>;
     listEntries(query?: MemoryEntryQuery): Promise<MemoryEntry[]>;
+    getMemoryEnabled(): Promise<boolean>;
     updateEntry(id: string, patch: MemoryEntryPatch): Promise<void>;
     deleteEntries(ids: string[]): Promise<void>;
     exportEntries(format: MemoryExportFormat): Promise<string>;

@@ -122,6 +122,7 @@ function repositoryFixture(overrides: Partial<VocabularyRepositoryFacade> = {}):
     return {
         queryHeat: vi.fn(async () => statisticsFixture()),
         listEntries: vi.fn(async () => entriesFixture()),
+        getMemoryEnabled: vi.fn(async () => true),
         updateEntry: vi.fn(async () => undefined),
         deleteEntries: vi.fn(async () => undefined),
         exportEntries: vi.fn(async () => ''),
@@ -414,19 +415,61 @@ describe('VocabularyHeatView', () => {
     it('shows local-only privacy status and pause controls in settings', async () => {
         const user = userEvent.setup();
         const setMemoryEnabled = vi.fn(async () => undefined);
+        const preferences = preferencesFixture();
+        preferences.privacy.saveTranslationHistory = false;
         render(
             <SettingsWindow
                 providers={[]}
                 activeProviderId=""
-                preferences={preferencesFixture()}
-                vocabularyRepository={repositoryFixture({ setMemoryEnabled })}
+                preferences={preferences}
+                vocabularyRepository={repositoryFixture({
+                    getMemoryEnabled: vi.fn(async () => true),
+                    setMemoryEnabled
+                })}
             />
         );
 
         expect(screen.getByRole('status', { name: 'Vocabulary privacy' }).textContent)
             .toContain('Local-only');
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', false);
         await user.click(screen.getByLabelText('Pause vocabulary memory'));
         expect(setMemoryEnabled).toHaveBeenCalledWith(false);
+    });
+
+    it('restores persisted memory pause state on remount instead of preferences', async () => {
+        const getMemoryEnabled = vi.fn()
+            .mockResolvedValueOnce(true)
+            .mockResolvedValueOnce(false);
+        const firstPreferences = preferencesFixture();
+        firstPreferences.privacy.saveTranslationHistory = false;
+        const first = render(
+            <SettingsWindow
+                providers={[]}
+                activeProviderId=""
+                preferences={firstPreferences}
+                vocabularyRepository={repositoryFixture({ getMemoryEnabled })}
+            />
+        );
+        await waitFor(() => expect(
+            screen.getByLabelText('Pause vocabulary memory')
+        ).toHaveProperty('checked', false));
+        first.unmount();
+
+        const secondPreferences = preferencesFixture();
+        secondPreferences.privacy.saveTranslationHistory = true;
+        render(
+            <SettingsWindow
+                providers={[]}
+                activeProviderId=""
+                preferences={secondPreferences}
+                vocabularyRepository={repositoryFixture({ getMemoryEnabled })}
+            />
+        );
+        await waitFor(() => expect(
+            screen.getByLabelText('Pause vocabulary memory')
+        ).toHaveProperty('checked', true));
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory paused');
     });
 
     it('virtualizes long rows while preserving accessible table positions', () => {

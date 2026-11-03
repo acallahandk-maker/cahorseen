@@ -39,6 +39,7 @@ import {
 import {
     deleteEntries,
     exportEntries,
+    getMemoryEnabled,
     listEntries,
     queryHeat,
     setMemoryEnabled,
@@ -150,6 +151,7 @@ app.whenReady().then(() => {
         memory: {
             queryHeat,
             listEntries,
+            getMemoryEnabled,
             updateEntry,
             deleteEntries,
             exportEntries,

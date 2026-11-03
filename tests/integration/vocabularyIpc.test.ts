@@ -3,9 +3,19 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { registerIpcRouter, type IpcMainLike } from '../../src/main/ipcRouter';
-import { MemoryDatabase } from '../../src/main/services/memoryDatabase';
-import { createVocabularyApi } from '../../src/preload/vocabularyAdapter';
-import type { TranslationTask } from '../../src/shared/contracts';
+import {
+    MemoryDatabase,
+    MemoryDatabaseError
+} from '../../src/main/services/memoryDatabase';
+import {
+    createVocabularyApi,
+    VocabularyExportSizeError
+} from '../../src/preload/vocabularyAdapter';
+import {
+    MAX_VOCABULARY_EXPORT_CHARS,
+    type TranslationTask,
+    type VocabularyRepositoryFacade
+} from '../../src/shared/contracts';
 
 const workerPath = resolve(process.cwd(), 'out/main/memoryWorker.js');
 const temporaryDirectories: string[] = [];
@@ -124,6 +134,7 @@ describe('vocabulary IPC repository adapter', () => {
 
         expect(await api.exportEntries('json')).toBe(await database.exportEntries('json'));
         expect(await api.exportEntries('csv')).toBe(await database.exportEntries('csv'));
+        expect(await api.getMemoryEnabled()).toBe(true);
 
         await api.deleteEntries([first.id]);
         expect((await api.listEntries({ search: 'updated' })).some((entry) => (
@@ -131,6 +142,7 @@ describe('vocabulary IPC repository adapter', () => {
         ))).toBe(false);
 
         await api.setMemoryEnabled(false);
+        expect(await api.getMemoryEnabled()).toBe(false);
         await database.recordTranslation(completedTask({
             id: 'task-disabled',
             sourceText: 'Disabled memory',
@@ -141,6 +153,116 @@ describe('vocabulary IPC repository adapter', () => {
             }
         }));
         expect((await api.listEntries({ search: 'disabled' }))).toHaveLength(0);
+        unregister();
+    });
+
+    it('preserves safe memory failure codes/messages and typed export failures across IPC', async () => {
+        const cases = [
+            ['busy', 'Translation memory is busy.'],
+            ['conflict', 'Vocabulary entry conflicts with existing data.'],
+            ['internal', 'Vocabulary operation failed.'],
+            ['invalid-request', 'Vocabulary request is invalid.'],
+            ['not-found', 'Vocabulary entry was not found.'],
+            ['storage', 'Vocabulary storage failed.'],
+            ['timeout', 'Vocabulary request timed out.'],
+            ['worker', 'Vocabulary worker failed.']
+        ] as const;
+        for (const [code, expectedMessage] of cases) {
+            const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+            const ipcMain: IpcMainLike = {
+                handle: (channel, listener) => handlers.set(channel, listener),
+                removeHandler: (channel) => void handlers.delete(channel)
+            };
+            const memory: VocabularyRepositoryFacade = {
+                queryHeat: async () => [],
+                listEntries: async () => {
+                    throw new MemoryDatabaseError(
+                        code,
+                        `Secret path C:\\temp\\api-key-${code}`
+                    );
+                },
+                getMemoryEnabled: async () => true,
+                updateEntry: async () => undefined,
+                deleteEntries: async () => undefined,
+                exportEntries: async () => '',
+                setMemoryEnabled: async () => undefined
+            };
+            const unregister = registerIpcRouter({
+                ipcMain,
+                secureConfig: {
+                    saveProvider: async () => {
+                        throw new Error('not used');
+                    },
+                    setActiveProvider: async () => undefined,
+                    getProviderSummaries: async () => [],
+                    testProvider: async () => {
+                        throw new Error('not used');
+                    }
+                },
+                memory,
+                isSenderAuthorized: () => true
+            });
+            const api = createVocabularyApi(async (channel, payload) => {
+                const handler = handlers.get(channel);
+                if (handler === undefined)
+                    throw new Error(`Missing IPC handler: ${channel}`);
+                return handler({}, payload);
+            });
+            await expect(api.listEntries()).rejects.toMatchObject({
+                name: 'IpcClientError',
+                code,
+                message: expectedMessage
+            });
+            unregister();
+        }
+
+        const handlers = new Map<string, (event: unknown, payload?: unknown) => unknown>();
+        const ipcMain: IpcMainLike = {
+            handle: (channel, listener) => handlers.set(channel, listener),
+            removeHandler: (channel) => void handlers.delete(channel)
+        };
+        const memory: VocabularyRepositoryFacade = {
+            queryHeat: async () => [],
+            listEntries: async () => [],
+            getMemoryEnabled: async () => true,
+            updateEntry: async () => undefined,
+            deleteEntries: async () => undefined,
+            exportEntries: async () => {
+                throw new MemoryDatabaseError(
+                    'export-too-large',
+                    `Secret oversized export ${'x'.repeat(100)}`
+                );
+            },
+            setMemoryEnabled: async () => undefined
+        };
+        const unregister = registerIpcRouter({
+            ipcMain,
+            secureConfig: {
+                saveProvider: async () => {
+                    throw new Error('not used');
+                },
+                setActiveProvider: async () => undefined,
+                getProviderSummaries: async () => [],
+                testProvider: async () => {
+                    throw new Error('not used');
+                }
+            },
+            memory,
+            isSenderAuthorized: () => true
+        });
+        const api = createVocabularyApi(async (channel, payload) => {
+            const handler = handlers.get(channel);
+            if (handler === undefined)
+                throw new Error(`Missing IPC handler: ${channel}`);
+            return handler({}, payload);
+        });
+        await expect(api.exportEntries('json')).rejects.toMatchObject({
+            name: 'VocabularyExportSizeError',
+            code: 'export-too-large',
+            maximum: MAX_VOCABULARY_EXPORT_CHARS
+        });
+        expect(new VocabularyExportSizeError(MAX_VOCABULARY_EXPORT_CHARS).message)
+            .toBe('Vocabulary export exceeds the 2,000,000 character limit.');
         unregister();
     });
 });

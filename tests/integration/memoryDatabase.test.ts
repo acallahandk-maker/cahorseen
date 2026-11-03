@@ -435,8 +435,10 @@ describe('MemoryDatabase', () => {
 
     it('pauses recording without deleting history and persists the pause', async () => {
         const first = await createMemory();
+        expect(await first.database.getMemoryEnabled()).toBe(true);
         await first.database.recordTranslation(completedTask({ id: 'before-pause' }));
         await first.database.setMemoryEnabled(false);
+        expect(await first.database.getMemoryEnabled()).toBe(false);
         first.now.value = new Date('2026-10-29T12:10:00.000Z');
         await first.database.recordTranslation(completedTask({ id: 'while-paused' }));
         expect(await first.database.listEntries()).toMatchObject([{ occurrenceCount: 1, lastUsedAt: '2026-10-29T12:00:00.000Z' }]);
@@ -448,9 +450,11 @@ describe('MemoryDatabase', () => {
             now: () => first.now.value
         });
         openDatabases.push(second);
+        expect(await second.getMemoryEnabled()).toBe(false);
         await second.recordTranslation(completedTask({ id: 'still-paused' }));
         expect(await second.listEntries()).toHaveLength(1);
         await second.setMemoryEnabled(true);
+        expect(await second.getMemoryEnabled()).toBe(true);
         first.now.value = new Date('2026-10-29T12:20:00.000Z');
         await second.recordTranslation(completedTask({ id: 'resumed' }));
         expect(await second.listEntries()).toMatchObject([{ occurrenceCount: 2, recentOccurrenceCount: 2 }]);
@@ -486,6 +490,7 @@ describe('MemoryDatabase', () => {
         const firstJson = await database.exportEntries('json');
         expect(await database.exportEntries('json')).toBe(firstJson);
         const exported = JSON.parse(firstJson) as { version: number; exportedAt: string; entries: { id: string }[] };
+        expect(firstJson).toBe(JSON.stringify(exported, null, 2));
         expect(exported.version).toBe(1);
         expect(exported.exportedAt).toBe('2026-10-29T12:00:00.000Z');
         expect(exported.entries.map((entry) => entry.id)).toEqual(exported.entries.map((entry) => entry.id).slice().sort());
@@ -495,6 +500,26 @@ describe('MemoryDatabase', () => {
         expect(lines).toHaveLength(3);
         expect(csv).toContain('Corrected translation');
         expect(await database.exportEntries('csv')).toBe(csv);
+    });
+
+    it('rejects oversized exports at the worker boundary before returning content', async () => {
+        const { database } = await createMemory();
+        const suffix = 'large synthetic vocabulary '.repeat(1_150);
+        for (let index = 0; index < 70; index += 1) {
+            await database.recordTranslation(completedTask({
+                id: `oversized-${index}`,
+                sourceText: `${index}:${suffix}`,
+                translatedText: `Translation ${index}`
+            }));
+        }
+        await expect(database.exportEntries('json')).rejects.toMatchObject({
+            name: 'MemoryDatabaseError',
+            code: 'export-too-large'
+        });
+        await expect(database.exportEntries('csv')).rejects.toMatchObject({
+            name: 'MemoryDatabaseError',
+            code: 'export-too-large'
+        });
     });
 
     it('deletes entries and every occurrence transactionally', async () => {

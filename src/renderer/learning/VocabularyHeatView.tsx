@@ -285,7 +285,7 @@ export function VocabularyHeatView({
     now = Date.now(),
     repository,
     actions,
-    memoryPaused: providedMemoryPaused = false,
+    memoryPaused: providedMemoryPaused,
     privacyLocalOnly = true,
     virtualization
 }: VocabularyHeatViewProps): React.JSX.Element {
@@ -310,7 +310,9 @@ export function VocabularyHeatView({
     const [repositoryEntries, setRepositoryEntries] = useState<readonly MemoryEntry[]>(entries);
     const [dialog, setDialog] = useState<VocabularyDialog>();
     const [editDraft, setEditDraft] = useState<EditDraft>();
-    const [memoryPaused, setMemoryPaused] = useState(providedMemoryPaused);
+    const [memoryPaused, setMemoryPaused] = useState<boolean | undefined>(
+        repository === undefined ? providedMemoryPaused ?? false : undefined
+    );
     const [scrollTop, setScrollTop] = useState(0);
     const [pendingAction, setPendingAction] = useState<
         'edit' | 'delete' | 'export' | 'pause' | 'load' | undefined
@@ -378,18 +380,20 @@ export function VocabularyHeatView({
             ...(from === undefined ? {} : { from })
         };
         try {
-            const [nextStatistics, nextEntries] = await Promise.all([
+            const [nextStatistics, nextEntries, memoryEnabled] = await Promise.all([
                 repository.queryHeat(common),
                 repository.listEntries({
                     ...common,
                     ...(query.length === 0 ? {} : { search: query }),
                     limit: 10_000
-                })
+                }),
+                repository.getMemoryEnabled()
             ]);
             if (!mountedRef.current || generation !== requestGeneration.current)
                 return;
             setRepositoryStatistics(nextStatistics);
             setRepositoryEntries(nextEntries);
+            setMemoryPaused(!memoryEnabled);
         } catch (error) {
             if (mountedRef.current && generation === requestGeneration.current)
                 setActionError(errorMessage(error, 'Vocabulary data could not be loaded.'));
@@ -425,8 +429,9 @@ export function VocabularyHeatView({
     }, [actions]);
 
     useEffect(() => {
-        setMemoryPaused(providedMemoryPaused);
-    }, [providedMemoryPaused]);
+        if (repository === undefined && providedMemoryPaused !== undefined)
+            setMemoryPaused(providedMemoryPaused);
+    }, [providedMemoryPaused, repository]);
 
     useEffect(() => {
         const generation = ++requestGeneration.current;
@@ -662,14 +667,18 @@ export function VocabularyHeatView({
                 <label>
                     <input
                         type="checkbox"
-                        checked={memoryPaused}
-                        disabled={!canPause || pendingAction !== undefined}
+                        checked={memoryPaused ?? false}
+                        disabled={!canPause || memoryPaused === undefined || pendingAction !== undefined}
                         onChange={(event) => void toggleMemory(event.target.checked)}
                     />
                     Pause vocabulary memory
                 </label>
                 <p role="status" aria-label="Vocabulary memory status">
-                    {memoryPaused ? 'Vocabulary memory paused' : 'Vocabulary memory active'}
+                    {memoryPaused === undefined
+                        ? 'Vocabulary memory status loading'
+                        : memoryPaused
+                            ? 'Vocabulary memory paused'
+                            : 'Vocabulary memory active'}
                 </p>
                 <p role="status" aria-label="Vocabulary privacy">
                     {privacyLocalOnly

@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import { caseFold } from 'unicode-case-folding';
 import { z } from 'zod';
 import {
+    MAX_VOCABULARY_EXPORT_CHARS,
     type HeatStatistic,
     type MemoryEntry,
     type TranslationTask
@@ -700,16 +701,89 @@ function csvValue(value: string | number): string {
     return `"${String(value).replace(/"/gu, '""')}"`;
 }
 
+class ExportTooLargeError extends Error {
+    readonly code = 'export-too-large';
+
+    constructor() {
+        super(`Vocabulary export exceeds the ${MAX_VOCABULARY_EXPORT_CHARS.toLocaleString()} character limit.`);
+        this.name = 'ExportTooLargeError';
+    }
+}
+
+class BoundedExportBuilder {
+    private readonly chunks: string[] = [];
+    private length = 0;
+
+    append(value: string | number): void {
+        const chunk = String(value);
+        if (this.length + chunk.length > MAX_VOCABULARY_EXPORT_CHARS)
+            throw new ExportTooLargeError();
+        this.chunks.push(chunk);
+        this.length += chunk.length;
+    }
+
+    build(): string {
+        return this.chunks.join('');
+    }
+}
+
+function appendJsonField(
+    builder: BoundedExportBuilder,
+    key: string,
+    value: string | number,
+    first: boolean,
+    last: boolean
+): void {
+    builder.append(first ? '      ' : ',\n      ');
+    builder.append(JSON.stringify(key));
+    builder.append(': ');
+    builder.append(typeof value === 'number' ? value : JSON.stringify(value));
+    if (last)
+        builder.append('\n');
+}
+
+function appendJsonEntry(
+    builder: BoundedExportBuilder,
+    row: EntryRow,
+    first: boolean
+): void {
+    const entry = toMemoryEntry(row);
+    builder.append(first ? '    ' : ',\n    ');
+    builder.append('{\n');
+    appendJsonField(builder, 'id', entry.id, true, false);
+    appendJsonField(builder, 'sourceText', entry.sourceText, false, false);
+    appendJsonField(builder, 'normalizedSource', entry.normalizedSource, false, false);
+    appendJsonField(builder, 'translatedText', entry.translatedText, false, false);
+    appendJsonField(builder, 'sourceLanguage', entry.sourceLanguage, false, false);
+    appendJsonField(builder, 'targetLanguage', entry.targetLanguage, false, false);
+    appendJsonField(builder, 'occurrenceCount', entry.occurrenceCount, false, false);
+    appendJsonField(builder, 'recentOccurrenceCount', entry.recentOccurrenceCount, false, false);
+    appendJsonField(builder, 'translationCount', entry.translationCount, false, false);
+    appendJsonField(builder, 'firstSeenAt', entry.firstSeenAt, false, false);
+    appendJsonField(builder, 'lastUsedAt', entry.lastUsedAt, false, false);
+    appendJsonField(builder, 'context', entry.context, false, false);
+    appendJsonField(builder, 'quizIntervalDays', entry.quizIntervalDays, false, false);
+    appendJsonField(builder, 'nextDueAt', entry.nextDueAt, false, true);
+    builder.append('    }');
+}
+
 function exportRows(rows: EntryRow[], nowMs: number, format: 'json' | 'csv'): string {
-    const entries = rows
-        .map(toMemoryEntry)
-        .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    const builder = new BoundedExportBuilder();
+    const sortedRows = rows.slice().sort((left, right) => (
+        left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+    ));
     if (format === 'json') {
-        return JSON.stringify({
-            version: 1,
-            exportedAt: toIso(nowMs),
-            entries
-        }, null, 2);
+        builder.append('{\n  "version": 1,\n  "exportedAt": ');
+        builder.append(JSON.stringify(toIso(nowMs)));
+        builder.append(',\n  "entries": ');
+        if (sortedRows.length === 0) {
+            builder.append('[]\n}');
+            return builder.build();
+        }
+        builder.append('[\n');
+        sortedRows.forEach((row, index) => appendJsonEntry(builder, row, index === 0));
+        builder.append('\n  ]\n}');
+        return builder.build();
     }
     const header = [
         'id',
@@ -727,9 +801,11 @@ function exportRows(rows: EntryRow[], nowMs: number, format: 'json' | 'csv'): st
         'quizIntervalDays',
         'nextDueAt'
     ];
-    const lines = [header.join(',')];
-    for (const entry of entries) {
-        lines.push([
+    builder.append(header.join(','));
+    for (const row of sortedRows) {
+        const entry = toMemoryEntry(row);
+        builder.append('\n');
+        [
             entry.id,
             entry.sourceText,
             entry.normalizedSource,
@@ -744,9 +820,14 @@ function exportRows(rows: EntryRow[], nowMs: number, format: 'json' | 'csv'): st
             entry.context,
             entry.quizIntervalDays,
             entry.nextDueAt
-        ].map(csvValue).join(','));
+        ].forEach((value, index) => {
+            if (index > 0)
+                builder.append(',');
+            builder.append(csvValue(value));
+        });
     }
-    return `${lines.join('\n')}\n`;
+    builder.append('\n');
+    return builder.build();
 }
 
 function updateEntry(
@@ -843,6 +924,8 @@ function handleRequest(database: DatabaseType, request: MemoryWorkerRequest): un
                     request.query.limit
                 ).map(toMemoryEntry)
             };
+        case 'getMemoryEnabled':
+            return { enabled: memoryEnabled(database) };
         case 'updateEntry':
             return { updated: updateEntry(database, request.id, request.patch) };
         case 'deleteEntries':
@@ -892,14 +975,19 @@ function run(database: DatabaseType): void {
             if (request.operation === 'close')
                 parentPort?.close();
         } catch (error) {
+            const exportTooLarge = error instanceof ExportTooLargeError;
             parentPort?.postMessage({
                 requestId: request.requestId,
                 ok: false,
                 error: {
-                    code: isUniqueConstraint(error)
+                    code: exportTooLarge
+                        ? 'export-too-large'
+                        : isUniqueConstraint(error)
                         ? 'conflict'
                         : isInputError(error) ? 'invalid-request' : 'internal',
-                    message: error instanceof Error ? error.message.slice(0, 500) : 'Memory operation failed.'
+                    message: exportTooLarge || isInputError(error)
+                        ? error instanceof Error ? error.message.slice(0, 500) : 'Memory operation failed.'
+                        : 'Memory operation failed.'
                 }
             });
         }
