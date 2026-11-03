@@ -6,7 +6,8 @@ import {
     type ProviderDetails,
     type ProviderSaveConfig,
     type ProviderSummary,
-    type SettingsPreferences
+    type SettingsPreferences,
+    type VocabularyRepositoryFacade
 } from '../../shared/contracts';
 import {
     VocabularyHeatView,
@@ -40,6 +41,7 @@ export interface SettingsWindowProps {
     onLoadProviderDetails?: (providerId: string) => Promise<ProviderDetails>;
     onReloadState?: () => Promise<SettingsStateSnapshot>;
     vocabulary?: VocabularyHeatViewProps;
+    vocabularyRepository?: VocabularyRepositoryFacade;
 }
 
 interface SettingsDesktopPetApi {
@@ -198,7 +200,8 @@ export default function SettingsWindow({
     onSavePreferences,
     onLoadProviderDetails,
     onReloadState,
-    vocabulary
+    vocabulary,
+    vocabularyRepository
 }: SettingsWindowProps): React.JSX.Element {
     const desktopPet = getDesktopPetApi();
     const [providers, setProviders] = useState<ProviderSummary[]>(providedProviders ?? []);
@@ -709,11 +712,20 @@ export default function SettingsWindow({
                     Save preferences
                 </button>
             </section>
-            {vocabulary === undefined ? null : (
+            {vocabulary === undefined && vocabularyRepository === undefined ? null : (
                 <section aria-label="Vocabulary history and heat">
                     <h2>Vocabulary history &amp; heat</h2>
                     <VocabularyHeatView
-                        {...vocabulary}
+                        statistics={vocabulary?.statistics ?? []}
+                        entries={vocabulary?.entries ?? []}
+                        now={vocabulary?.now}
+                        actions={vocabulary?.actions}
+                        virtualization={vocabulary?.virtualization}
+                        repository={vocabularyRepository ?? vocabulary?.repository}
+                        memoryPaused={
+                            vocabulary?.memoryPaused
+                            ?? !preferences.privacy.saveTranslationHistory
+                        }
                         privacyLocalOnly={preferences.privacy.localOnly}
                     />
                 </section>

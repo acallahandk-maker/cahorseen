@@ -12,6 +12,7 @@ export const MAX_SYSTEM_PROMPT_CHARS = 4_000;
 export const MAX_TARGET_LANGUAGE_CHARS = 64;
 export const MAX_TRANSLATED_TEXT_CHARS = 16_000;
 export const MAX_TRANSLATION_DELTA_CHARS = 2_000;
+export const MAX_VOCABULARY_EXPORT_CHARS = 2_000_000;
 
 function isHttpsUrl(value: string): boolean {
     try {
@@ -164,6 +165,41 @@ export const memoryEntrySchema = z.strictObject({
     quizIntervalDays: positiveInteger,
     nextDueAt: timestamp
 });
+
+export const memoryFilterSchema = z.strictObject({
+    sourceLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    from: timestamp.optional(),
+    to: timestamp.optional()
+}).refine((filter) => filter.from === undefined || filter.to === undefined
+    || new Date(filter.from).getTime() <= new Date(filter.to).getTime(), {
+    message: 'from must not be after to',
+    path: ['from']
+});
+
+export const memoryEntryQuerySchema = memoryFilterSchema.extend({
+    search: z.string().max(MAX_SOURCE_TEXT_CHARS).optional(),
+    limit: z.number().int().min(1).max(10_000).optional()
+});
+
+export const memoryEntryPatchSchema = z.strictObject({
+    sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS).optional(),
+    translatedText: z.string().max(MAX_TRANSLATED_TEXT_CHARS).optional(),
+    sourceLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
+    context: z.string().max(MAX_CONTEXT_CHARS).optional(),
+    quizIntervalDays: positiveInteger.optional(),
+    nextDueAt: timestamp.optional()
+}).refine((patch) => Object.keys(patch).length > 0, {
+    message: 'At least one field must be supplied'
+});
+
+export const memoryExportFormatSchema = z.enum(['json', 'csv']);
+
+export type MemoryFilter = z.infer<typeof memoryFilterSchema>;
+export type MemoryEntryQuery = z.infer<typeof memoryEntryQuerySchema>;
+export type MemoryEntryPatch = z.infer<typeof memoryEntryPatchSchema>;
+export type MemoryExportFormat = z.infer<typeof memoryExportFormatSchema>;
 
 export const memoryPersistenceStatusSchema = z.strictObject({
     state: z.enum(['recorded', 'failed']),
@@ -421,6 +457,15 @@ export const settingsIpcChannels = {
     open: 'desktop-pet:settings-open'
 } as const;
 
+export const memoryIpcChannels = {
+    queryHeat: 'desktop-pet:memory-query-heat',
+    listEntries: 'desktop-pet:memory-list-entries',
+    updateEntry: 'desktop-pet:memory-update-entry',
+    deleteEntries: 'desktop-pet:memory-delete-entries',
+    exportEntries: 'desktop-pet:memory-export-entries',
+    setMemoryEnabled: 'desktop-pet:memory-set-enabled'
+} as const;
+
 export const settingsPreferencesSchema = z.strictObject({
     hotkey: z.string().min(1).max(64).refine(isValidHotkey, {
         message: 'Use one or more modifiers plus exactly one key.'
@@ -594,3 +639,12 @@ export type PerformanceFrameRate = z.infer<typeof performanceFrameRateSchema>;
 export type PerformanceMode = z.infer<typeof performanceModeSchema>;
 export type SettingsPreferences = z.infer<typeof settingsPreferencesSchema>;
 export type SettingsState = z.infer<typeof settingsStateSchema>;
+
+export interface VocabularyRepositoryFacade {
+    queryHeat(filter?: MemoryFilter): Promise<HeatStatistic[]>;
+    listEntries(query?: MemoryEntryQuery): Promise<MemoryEntry[]>;
+    updateEntry(id: string, patch: MemoryEntryPatch): Promise<void>;
+    deleteEntries(ids: string[]): Promise<void>;
+    exportEntries(format: MemoryExportFormat): Promise<string>;
+    setMemoryEnabled(enabled: boolean): Promise<void>;
+}

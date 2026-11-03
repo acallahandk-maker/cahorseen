@@ -36,6 +36,14 @@ import {
     screenshotIpcChannels,
     translationIpcChannels
 } from '../shared/contracts';
+import {
+    deleteEntries,
+    exportEntries,
+    listEntries,
+    queryHeat,
+    setMemoryEnabled,
+    updateEntry
+} from './services/memoryDatabase';
 
 const pingChannel = 'desktop-pet:ping';
 
@@ -138,6 +146,14 @@ app.whenReady().then(() => {
         },
         screenshot: {
             translateScreenshot
+        },
+        memory: {
+            queryHeat,
+            listEntries,
+            updateEntry,
+            deleteEntries,
+            exportEntries,
+            setMemoryEnabled
         },
         isSenderAuthorized: (event) => {
             const senderFrame = (

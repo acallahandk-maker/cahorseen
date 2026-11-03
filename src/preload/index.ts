@@ -31,9 +31,11 @@ import {
     type SettingsState,
     type TranslationEvent,
     type TranslationRetryInput,
-    type TranslationTask
+    type TranslationTask,
+    type VocabularyRepositoryFacade
 } from '../shared/contracts';
 import { parseIpcAck, parseIpcResult, parseIpcTaskResult } from './ipcResult';
+import { createVocabularyApi } from './vocabularyAdapter';
 
 const pingChannel = 'desktop-pet:ping';
 const providerChannels = {
@@ -50,6 +52,7 @@ const pingResponseSchema = z.object({
 
 export interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
+    vocabulary: VocabularyRepositoryFacade;
     captureSelectionOnce: (taskId: string) => Promise<SelectionCapture>;
     translateSelection: (options?: {
         taskId?: string;
@@ -87,6 +90,9 @@ export interface DesktopPetApi {
 
 const desktopPetApi: DesktopPetApi = {
     ping: async () => pingResponseSchema.parse(await ipcRenderer.invoke(pingChannel)),
+    vocabulary: createVocabularyApi(async (channel, payload) => (
+        ipcRenderer.invoke(channel, payload)
+    )),
     captureSelectionOnce: async (taskId) => {
         const request = selectionCaptureStartSchema.parse({ taskId });
         return parseIpcResult(

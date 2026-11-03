@@ -8,11 +8,17 @@ import {
     MAX_TARGET_LANGUAGE_CHARS,
     MAX_TRANSLATED_TEXT_CHARS,
     heatStatisticSchema,
+    memoryEntryPatchSchema,
+    memoryEntryQuerySchema,
+    memoryFilterSchema,
     memoryEntrySchema,
     memoryPersistenceStatusSchema,
     translationTaskSchema,
     type HeatStatistic,
     type MemoryEntry,
+    type MemoryEntryPatch,
+    type MemoryEntryQuery,
+    type MemoryFilter,
     type MemoryPersistenceStatus,
     type TranslationTask
 } from '../../shared/contracts';
@@ -21,42 +27,9 @@ import {
     validateVocabularySourceText
 } from '../../shared/vocabularyText';
 
-const timestampSchema = z.string().datetime({ offset: true });
 const nonEmptyString = z.string().min(1);
 const positiveInteger = z.number().int().positive();
 const epochMilliseconds = z.number().int();
-
-export const memoryFilterSchema = z.strictObject({
-    sourceLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
-    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
-    from: timestampSchema.optional(),
-    to: timestampSchema.optional()
-}).refine((filter) => filter.from === undefined || filter.to === undefined
-    || new Date(filter.from).getTime() <= new Date(filter.to).getTime(), {
-    message: 'from must not be after to',
-    path: ['from']
-});
-
-export const memoryEntryQuerySchema = memoryFilterSchema.extend({
-    search: z.string().max(MAX_SOURCE_TEXT_CHARS).optional(),
-    limit: z.number().int().min(1).max(10_000).optional()
-});
-
-export const memoryEntryPatchSchema = z.strictObject({
-    sourceText: z.string().min(1).max(MAX_SOURCE_TEXT_CHARS).optional(),
-    translatedText: z.string().max(MAX_TRANSLATED_TEXT_CHARS).optional(),
-    sourceLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
-    targetLanguage: z.string().min(1).max(MAX_TARGET_LANGUAGE_CHARS).optional(),
-    context: z.string().max(MAX_CONTEXT_CHARS).optional(),
-    quizIntervalDays: positiveInteger.optional(),
-    nextDueAt: timestampSchema.optional()
-}).refine((patch) => Object.keys(patch).length > 0, {
-    message: 'At least one field must be supplied'
-});
-
-export type MemoryFilter = z.infer<typeof memoryFilterSchema>;
-export type MemoryEntryQuery = z.infer<typeof memoryEntryQuerySchema>;
-export type MemoryEntryPatch = z.infer<typeof memoryEntryPatchSchema>;
 
 const memoryErrorSchema = z.strictObject({
     code: z.enum([

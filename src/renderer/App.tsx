@@ -6,7 +6,8 @@ import type {
     TranslationError,
     TranslationEvent,
     TranslationRetryInput,
-    TranslationTask
+    TranslationTask,
+    VocabularyRepositoryFacade
 } from '../shared/contracts';
 import { translationErrorCodeSchema } from '../shared/contracts';
 import PetWindow from './pet/PetWindow';
@@ -22,6 +23,7 @@ import {
 
 interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
+    vocabulary: VocabularyRepositoryFacade;
     captureSelectionOnce: (taskId: string) => Promise<SelectionCapture>;
     translateSelection: (options?: {
         taskId?: string;
@@ -376,6 +378,10 @@ export default function App(): React.JSX.Element | null {
     if (isScreenshotOverlayMode())
         return <ScreenshotOverlay />;
     if (isSettingsMode())
-        return <SettingsWindow />;
+        return (
+            <SettingsWindow
+                vocabularyRepository={window.desktopPet.vocabulary}
+            />
+        );
     return <PetApp />;
 }

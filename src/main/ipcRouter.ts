@@ -4,6 +4,14 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import {
     connectionTestResultSchema,
+    heatStatisticSchema,
+    MAX_VOCABULARY_EXPORT_CHARS,
+    memoryEntryPatchSchema,
+    memoryEntryQuerySchema,
+    memoryEntrySchema,
+    memoryExportFormatSchema,
+    memoryFilterSchema,
+    memoryIpcChannels,
     providerDetailsSchema,
     providerErrorCodeSchema,
     providerSaveConfigSchema,
@@ -28,6 +36,7 @@ import {
     type ProviderSummary,
     type ScreenBounds,
     type SelectionCapture,
+    type VocabularyRepositoryFacade,
     type SettingsPreferences,
     type SettingsState,
     type TranslationError,
@@ -77,6 +86,8 @@ export interface ScreenshotIpcService {
     ): Promise<TranslationTask>;
 }
 
+export type MemoryIpcService = VocabularyRepositoryFacade;
+
 export interface IpcMainLike {
     handle(channel: string, listener: (event: unknown, payload?: unknown) => unknown): void;
     removeHandler(channel: string): void;
@@ -87,6 +98,7 @@ export interface RegisterIpcRouterOptions {
     secureConfig: ProviderIpcService;
     selection?: SelectionIpcService;
     screenshot?: ScreenshotIpcService;
+    memory?: MemoryIpcService;
     isSenderAuthorized?: (event: unknown) => boolean;
     openSettings?: () => void;
 }
@@ -94,7 +106,13 @@ export interface RegisterIpcRouterOptions {
 type IpcFailure = {
     ok: false;
     error: {
-        code: 'unauthorized' | 'invalid-request' | 'request-failed' | ProviderErrorCode | TranslationError['code'];
+        code:
+            | 'unauthorized'
+            | 'invalid-request'
+            | 'request-failed'
+            | 'export-too-large'
+            | ProviderErrorCode
+            | TranslationError['code'];
         message: string;
     };
 };
@@ -130,6 +148,23 @@ const setActivePayloadSchema = z.strictObject({
 });
 
 const emptyPayloadSchema = z.strictObject({});
+
+const memoryUpdatePayloadSchema = z.strictObject({
+    id: z.string().min(1),
+    patch: memoryEntryPatchSchema
+});
+
+const memoryDeletePayloadSchema = z.strictObject({
+    ids: z.array(z.string().min(1)).min(1).max(500)
+});
+
+const memoryExportPayloadSchema = z.strictObject({
+    format: memoryExportFormatSchema
+});
+
+const memoryEnabledPayloadSchema = z.strictObject({
+    enabled: z.boolean()
+});
 
 export function getProductionRendererFileUrl(): string {
     return pathToFileURL(join(__dirname, '../renderer/index.html')).href;
@@ -170,6 +205,12 @@ function safeFailure(error: unknown): IpcFailure {
             return failure('invalid-config', providerErrorMessage('invalid-config'));
     }
     return failure('request-failed', 'Provider request failed.');
+}
+
+function translationTaskErrorCode(
+    code: IpcFailure['error']['code']
+): TranslationError['code'] {
+    return code === 'export-too-large' ? 'request-failed' : code;
 }
 
 function safeSelectionFailure(error: unknown): IpcFailure {
@@ -249,7 +290,7 @@ function failedSelectionTask(
         targetLanguage: 'und',
         ...providerDetails,
         error: error.message,
-        errorCode: error.code
+        errorCode: translationTaskErrorCode(error.code)
     };
 }
 
@@ -275,12 +316,12 @@ function failedScreenshotTask(
         bounds,
         ...providerDetails,
         error: error.message,
-        errorCode: error.code
+        errorCode: translationTaskErrorCode(error.code)
     };
 }
 
 export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void {
-    const { ipcMain, secureConfig, selection, screenshot } = options;
+    const { ipcMain, secureConfig, selection, screenshot, memory } = options;
     const isSenderAuthorized = options.isSenderAuthorized ?? defaultIsSenderAuthorized;
     const activeTasks = new Map<string, ActiveTaskRecord>();
     const createActiveTask = (
@@ -505,6 +546,106 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 return failure('invalid-request', 'Settings open request is invalid.');
             options.openSettings?.();
             return { ok: true } satisfies IpcSaveSuccess;
+        });
+    }
+
+    if (memory !== undefined) {
+        ipcMain.handle(memoryIpcChannels.queryHeat, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = memoryFilterSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Vocabulary heat query is invalid.');
+            try {
+                return {
+                    ok: true,
+                    value: z.array(heatStatisticSchema).parse(
+                        await memory.queryHeat(parsed.data)
+                    )
+                } satisfies IpcSuccess<unknown>;
+            } catch (error) {
+                return safeFailure(error);
+            }
+        });
+
+        ipcMain.handle(memoryIpcChannels.listEntries, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = memoryEntryQuerySchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Vocabulary entry query is invalid.');
+            try {
+                return {
+                    ok: true,
+                    value: z.array(memoryEntrySchema).parse(
+                        await memory.listEntries(parsed.data)
+                    )
+                } satisfies IpcSuccess<unknown>;
+            } catch (error) {
+                return safeFailure(error);
+            }
+        });
+
+        ipcMain.handle(memoryIpcChannels.updateEntry, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = memoryUpdatePayloadSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Vocabulary entry update is invalid.');
+            try {
+                await memory.updateEntry(parsed.data.id, parsed.data.patch);
+                return { ok: true } satisfies IpcSaveSuccess;
+            } catch (error) {
+                return safeFailure(error);
+            }
+        });
+
+        ipcMain.handle(memoryIpcChannels.deleteEntries, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = memoryDeletePayloadSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Vocabulary entry deletion is invalid.');
+            try {
+                await memory.deleteEntries(parsed.data.ids);
+                return { ok: true } satisfies IpcSaveSuccess;
+            } catch (error) {
+                return safeFailure(error);
+            }
+        });
+
+        ipcMain.handle(memoryIpcChannels.exportEntries, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = memoryExportPayloadSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Vocabulary export request is invalid.');
+            try {
+                const value = await memory.exportEntries(parsed.data.format);
+                if (value.length > MAX_VOCABULARY_EXPORT_CHARS) {
+                    return failure(
+                        'export-too-large',
+                        `Vocabulary export exceeds the ${MAX_VOCABULARY_EXPORT_CHARS.toLocaleString()} character limit.`
+                    );
+                }
+                return { ok: true, value } satisfies IpcSuccess<string>;
+            } catch (error) {
+                return safeFailure(error);
+            }
+        });
+
+        ipcMain.handle(memoryIpcChannels.setMemoryEnabled, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = memoryEnabledPayloadSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Vocabulary memory setting is invalid.');
+            try {
+                await memory.setMemoryEnabled(parsed.data.enabled);
+                return { ok: true } satisfies IpcSaveSuccess;
+            } catch (error) {
+                return safeFailure(error);
+            }
         });
     }
 
@@ -735,6 +876,12 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         ipcMain.removeHandler(settingsIpcChannels.get);
         ipcMain.removeHandler(settingsIpcChannels.save);
         ipcMain.removeHandler(settingsIpcChannels.open);
+        ipcMain.removeHandler(memoryIpcChannels.queryHeat);
+        ipcMain.removeHandler(memoryIpcChannels.listEntries);
+        ipcMain.removeHandler(memoryIpcChannels.updateEntry);
+        ipcMain.removeHandler(memoryIpcChannels.deleteEntries);
+        ipcMain.removeHandler(memoryIpcChannels.exportEntries);
+        ipcMain.removeHandler(memoryIpcChannels.setMemoryEnabled);
         ipcMain.removeHandler(translationIpcChannels.captureSelection);
         ipcMain.removeHandler(translationIpcChannels.translateSelection);
         ipcMain.removeHandler(screenshotIpcChannels.translate);
