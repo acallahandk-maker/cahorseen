@@ -627,6 +627,15 @@ function getDefaultDatabase(): Promise<MemoryDatabase> {
     return defaultDatabase;
 }
 
+export async function closeDefaultMemoryDatabase(): Promise<void> {
+    const pendingDatabase = defaultDatabase;
+    defaultDatabase = undefined;
+    if (pendingDatabase === undefined)
+        return;
+    const database = await pendingDatabase;
+    await database.close();
+}
+
 export async function recordTranslation(task: TranslationTask): Promise<void> {
     await (await getDefaultDatabase()).recordTranslation(task);
 }

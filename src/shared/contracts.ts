@@ -28,7 +28,7 @@ export function isValidHotkey(value: string): boolean {
         return false;
     const modifiers = parts.slice(0, -1);
     const key = parts.at(-1);
-    const allowedModifiers = ['Alt', 'Ctrl', 'Meta', 'Shift'];
+    const allowedModifiers = ['Alt', 'Control', 'Ctrl', 'Meta', 'Shift'];
     const modifierAliases = ['Alt', 'Control', 'Meta', 'OS', 'Shift'];
     return key !== undefined
         && !modifierAliases.includes(key)
@@ -490,6 +490,11 @@ export const settingsIpcChannels = {
     open: 'desktop-pet:settings-open'
 } as const;
 
+export const performanceIpcChannels = {
+    get: 'desktop-pet:performance-get',
+    changed: 'desktop-pet:performance-changed'
+} as const;
+
 export const memoryIpcChannels = {
     queryHeat: 'desktop-pet:memory-query-heat',
     listEntries: 'desktop-pet:memory-list-entries',
@@ -510,6 +515,9 @@ export const settingsPreferencesSchema = z.strictObject({
     hotkey: z.string().min(1).max(64).refine(isValidHotkey, {
         message: 'Use one or more modifiers plus exactly one key.'
     }),
+    screenshotHotkey: z.string().min(1).max(64).refine(isValidHotkey, {
+        message: 'Use one or more modifiers plus exactly one key.'
+    }).default('Ctrl+Shift+S'),
     privacy: z.strictObject({
         localOnly: z.boolean(),
         saveTranslationHistory: z.boolean(),

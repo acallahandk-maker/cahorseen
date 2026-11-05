@@ -81,6 +81,7 @@ export interface ProviderPreset {
 
 export const DEFAULT_SETTINGS_PREFERENCES: SettingsPreferences = {
     hotkey: 'Ctrl+Shift+T',
+    screenshotHotkey: 'Ctrl+Shift+S',
     privacy: {
         localOnly: true,
         saveTranslationHistory: false,

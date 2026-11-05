@@ -65,6 +65,7 @@ const detailsB: ProviderDetails = {
 
 const preferences: SettingsPreferences = {
     hotkey: 'Ctrl+Shift+T',
+    screenshotHotkey: 'Ctrl+Shift+S',
     privacy: {
         localOnly: true,
         saveTranslationHistory: false,
@@ -616,6 +617,32 @@ describe('SettingsWindow', () => {
             ...preferences,
             hotkey: 'Ctrl+Control'
         }).success).toBe(false);
+    });
+
+    it('configures both global shortcuts and rejects conflicting keys before saving', async () => {
+        const user = userEvent.setup();
+        const onSavePreferences = vi.fn(async () => undefined);
+        const configurablePreferences = {
+            ...preferences,
+            screenshotHotkey: 'Ctrl+Shift+S'
+        } as SettingsPreferences;
+        render(
+            <SettingsWindow
+                providers={providers}
+                activeProviderId="provider-a"
+                preferences={configurablePreferences}
+                onSavePreferences={onSavePreferences}
+            />
+        );
+
+        const screenshotHotkey = screen.getByLabelText('Screenshot hotkey');
+        expect(screenshotHotkey).toHaveProperty('value', 'Ctrl+Shift+S');
+        await user.click(screenshotHotkey);
+        await user.keyboard('{Control>}{Shift>}{T}{/Shift}{/Control}');
+        await user.click(screen.getByRole('button', { name: 'Save preferences' }));
+
+        expect(onSavePreferences).not.toHaveBeenCalled();
+        expect(screen.getByRole('alert').textContent).toMatch(/unique|conflict/i);
     });
 
     it('preserves typed codes when parsing IPC failures and masks stored secrets', () => {

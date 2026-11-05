@@ -13,6 +13,8 @@ import {
     memoryErrorCodeSchema,
     memoryFilterSchema,
     memoryIpcChannels,
+    performanceIpcChannels,
+    performanceModeSchema,
     quizAnswerRequestSchema,
     quizFeedbackSchema,
     quizIpcChannels,
@@ -49,6 +51,7 @@ import {
     type QuizFeedback,
     type QuizQuestion,
     type VocabularyRepositoryFacade,
+    type PerformanceMode,
     type SettingsPreferences,
     type SettingsState,
     type TranslationError,
@@ -116,6 +119,7 @@ export interface RegisterIpcRouterOptions {
     isSenderAuthorized?: (event: unknown) => boolean;
     openSettings?: () => void;
     onActiveTranslationChange?: (active: boolean) => void;
+    getPerformanceMode?: () => PerformanceMode;
 }
 
 type IpcFailure = {
@@ -608,6 +612,23 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         }
     });
 
+    if (options.getPerformanceMode !== undefined) {
+        ipcMain.handle(performanceIpcChannels.get, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            if (payload !== undefined && !emptyPayloadSchema.safeParse(payload).success)
+                return failure('invalid-request', 'Performance request is invalid.');
+            try {
+                return {
+                    ok: true,
+                    value: performanceModeSchema.parse(options.getPerformanceMode?.())
+                } satisfies IpcSuccess<PerformanceMode>;
+            } catch (error) {
+                return safeFailure(error);
+            }
+        });
+    }
+
     if (options.openSettings !== undefined) {
         ipcMain.handle(settingsIpcChannels.open, async (event, payload) => {
             if (!isSenderAuthorized(event))
@@ -1016,6 +1037,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         ipcMain.removeHandler(settingsIpcChannels.get);
         ipcMain.removeHandler(settingsIpcChannels.save);
         ipcMain.removeHandler(settingsIpcChannels.open);
+        ipcMain.removeHandler(performanceIpcChannels.get);
         ipcMain.removeHandler(memoryIpcChannels.queryHeat);
         ipcMain.removeHandler(memoryIpcChannels.listEntries);
         ipcMain.removeHandler(memoryIpcChannels.getMemoryEnabled);

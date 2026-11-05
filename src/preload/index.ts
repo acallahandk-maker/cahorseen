@@ -12,6 +12,8 @@ import {
     quizPreferencesPatchSchema,
     quizQuestionRequestSchema,
     quizQuestionSchema,
+    performanceIpcChannels,
+    performanceModeSchema,
     selectionCaptureStartSchema,
     selectionCaptureSchema,
     screenBoundsSchema,
@@ -34,6 +36,7 @@ import {
     type QuizApi,
     type QuizFeedback,
     type QuizPreferencesPatch,
+    type PerformanceMode,
     type SelectionCapture,
     type ScreenBounds,
     type SettingsPreferences,
@@ -80,6 +83,10 @@ export interface DesktopPetApi {
     ) => Promise<ConnectionTestResult>;
     getSettings: () => Promise<SettingsState>;
     saveSettings: (preferences: SettingsPreferences) => Promise<SettingsState>;
+    getPerformanceMode: () => Promise<PerformanceMode>;
+    onPerformanceChange: (
+        listener: (mode: PerformanceMode) => void
+    ) => () => void;
     openSettings: () => Promise<void>;
     cancelTranslation: (taskId: string) => Promise<void>;
     openScreenshotSelection: () => Promise<void>;
@@ -199,6 +206,25 @@ const desktopPetApi: DesktopPetApi = {
             settingsStateSchema,
             await ipcRenderer.invoke(settingsIpcChannels.save, request)
         );
+    },
+    getPerformanceMode: async () => parseIpcResult(
+        performanceModeSchema,
+        await ipcRenderer.invoke(performanceIpcChannels.get, {})
+    ),
+    onPerformanceChange: (listener) => {
+        const channelListener = (
+            _event: Electron.IpcRendererEvent,
+            payload: unknown
+        ): void => {
+            listener(performanceModeSchema.parse(payload));
+        };
+        ipcRenderer.on(performanceIpcChannels.changed, channelListener);
+        return () => {
+            ipcRenderer.removeListener(
+                performanceIpcChannels.changed,
+                channelListener
+            );
+        };
     },
     openSettings: async () => {
         parseIpcAck(await ipcRenderer.invoke(settingsIpcChannels.open, {}));

@@ -74,6 +74,7 @@ export interface HotkeyValidation {
 
 const defaultPreferences: SettingsPreferences = settingsPreferencesSchema.parse({
     hotkey: 'Ctrl+Shift+T',
+    screenshotHotkey: 'Ctrl+Shift+S',
     privacy: {
         localOnly: true,
         saveTranslationHistory: false,
@@ -98,6 +99,22 @@ export function maskSecret(secret: string): string {
 
 function normalizeKey(value: string): string {
     return value.length === 1 ? value.toUpperCase() : value;
+}
+
+function canonicalHotkey(value: string): string {
+    return value
+        .split('+')
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => {
+            const lower = part.toLowerCase();
+            if (lower === 'ctrl' || lower === 'control')
+                return 'control';
+            if (lower === 'meta' || lower === 'os' || lower === 'super')
+                return 'super';
+            return part.length === 1 ? part.toUpperCase() : part;
+        })
+        .join('+');
 }
 
 export function hotkeyFromEvent(event: HotkeyEventLike): string {
@@ -221,6 +238,9 @@ export default function SettingsWindow({
     const [error, setError] = useState<SettingsError | undefined>(providedError);
     const [testResult, setTestResult] = useState<ConnectionTestResult>();
     const [hotkeyDraft, setHotkeyDraft] = useState(preferences.hotkey);
+    const [screenshotHotkeyDraft, setScreenshotHotkeyDraft] = useState(
+        preferences.screenshotHotkey
+    );
     const detailGeneration = useRef(0);
     const selectionGeneration = useRef(0);
     const initialDetailsRequested = useRef(false);
@@ -235,6 +255,7 @@ export default function SettingsWindow({
         if (providedPreferences !== undefined) {
             setPreferences(providedPreferences);
             setHotkeyDraft(providedPreferences.hotkey);
+            setScreenshotHotkeyDraft(providedPreferences.screenshotHotkey);
         }
     }, [providedPreferences]);
 
@@ -293,6 +314,7 @@ export default function SettingsWindow({
         setActiveProviderId(nextActive);
         setPreferences(snapshot.preferences);
         setHotkeyDraft(snapshot.preferences.hotkey);
+        setScreenshotHotkeyDraft(snapshot.preferences.screenshotHotkey);
         setLoading(false);
         if (nextActive.length === 0) {
             ++detailGeneration.current;
@@ -329,6 +351,7 @@ export default function SettingsWindow({
             setProviders(summaries);
             setPreferences(settings.preferences);
             setHotkeyDraft(settings.preferences.hotkey);
+            setScreenshotHotkeyDraft(settings.preferences.screenshotHotkey);
             setActiveProviderId(nextActive);
             setLoading(false);
             if (nextActive.length > 0) {
@@ -518,10 +541,29 @@ export default function SettingsWindow({
             });
             return;
         }
+        const screenshotValidation = validateHotkey(screenshotHotkeyDraft);
+        if (!screenshotValidation.valid) {
+            setError({
+                code: 'invalid-request',
+                message: screenshotValidation.error ?? 'Screenshot hotkey is invalid.'
+            });
+            return;
+        }
+        if (
+            canonicalHotkey(validation.value ?? hotkeyDraft)
+            === canonicalHotkey(screenshotValidation.value ?? screenshotHotkeyDraft)
+        ) {
+            setError({
+                code: 'invalid-request',
+                message: 'Global shortcut keys must be unique.'
+            });
+            return;
+        }
         try {
             const parsed = settingsPreferencesSchema.parse({
                 ...preferences,
-                hotkey: validation.value ?? hotkeyDraft
+                hotkey: validation.value ?? hotkeyDraft,
+                screenshotHotkey: screenshotValidation.value ?? screenshotHotkeyDraft
             });
             await (onSavePreferences ?? desktopPet?.saveSettings)?.(parsed);
             setPreferences(parsed);
@@ -673,6 +715,26 @@ export default function SettingsWindow({
                                 setError({
                                     code: 'invalid-request',
                                     message: validation.error ?? 'Hotkey is invalid.'
+                                });
+                            }
+                        }}
+                    />
+                </label>
+                <label>
+                    Screenshot hotkey
+                    <input
+                        aria-label="Screenshot hotkey"
+                        value={screenshotHotkeyDraft}
+                        onChange={(event) => setScreenshotHotkeyDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                            event.preventDefault();
+                            const captured = hotkeyFromEvent(event);
+                            const validation = validateHotkey(captured);
+                            setScreenshotHotkeyDraft(captured);
+                            if (!validation.valid) {
+                                setError({
+                                    code: 'invalid-request',
+                                    message: validation.error ?? 'Screenshot hotkey is invalid.'
                                 });
                             }
                         }}

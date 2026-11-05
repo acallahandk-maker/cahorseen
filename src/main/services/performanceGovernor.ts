@@ -35,14 +35,14 @@ function reasonFromContext(context: PerformanceContext): PerformanceReason {
         return 'paused';
     if (context.reason === 'paused' || context.reason === 'fullscreen')
         return context.reason;
+    if (context.fullscreen === true)
+        return 'fullscreen';
     if (context.hidden === true)
         return 'hidden';
     if (context.battery === true)
         return 'battery';
     if (context.idle === true)
         return 'idle';
-    if (context.fullscreen === true)
-        return 'fullscreen';
     return context.reason ?? 'normal';
 }
 

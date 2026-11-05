@@ -113,6 +113,7 @@ function statisticsFixture(): HeatStatistic[] {
 function preferencesFixture(): SettingsPreferences {
     return {
         hotkey: 'Ctrl+Shift+T',
+        screenshotHotkey: 'Ctrl+Shift+S',
         privacy: {
             localOnly: true,
             saveTranslationHistory: true,

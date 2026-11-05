@@ -7,6 +7,7 @@ import type {
     TranslationEvent,
     TranslationRetryInput,
     TranslationTask,
+    PerformanceMode,
     QuizQuestion,
     QuizApi,
     VocabularyRepositoryFacade
@@ -34,6 +35,10 @@ interface DesktopPetApi {
         sourceText?: string;
     }) => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
+    getPerformanceMode: () => Promise<PerformanceMode>;
+    onPerformanceChange: (
+        listener: (mode: PerformanceMode) => void
+    ) => () => void;
     openSettings: () => Promise<void>;
     copyTranslation: (text: string) => Promise<void>;
     speakTranslation: (text: string) => void;
@@ -136,6 +141,7 @@ function ScreenshotOverlay(): React.JSX.Element | null {
 }
 
 function PetApp(): React.JSX.Element {
+    const [performanceMode, setPerformanceMode] = useState<PerformanceMode>();
     const [translation, setTranslation] = useState<TranslationBubbleState>({
         task: {
             id: 'starting',
@@ -363,6 +369,32 @@ function PetApp(): React.JSX.Element {
     }, [loadQuiz]);
 
     useEffect(() => {
+        const performanceApi = window.desktopPet as Partial<DesktopPetApi>;
+        if (
+            performanceApi.getPerformanceMode === undefined
+            || performanceApi.onPerformanceChange === undefined
+        )
+            return;
+        let disposed = false;
+        void performanceApi.getPerformanceMode()
+            .then((mode) => {
+                if (!disposed)
+                    setPerformanceMode(mode);
+            })
+            .catch(() => undefined);
+        const removePerformanceListener = performanceApi.onPerformanceChange(
+            (mode) => {
+                if (!disposed)
+                    setPerformanceMode(mode);
+            }
+        );
+        return () => {
+            disposed = true;
+            removePerformanceListener();
+        };
+    }, []);
+
+    useEffect(() => {
         const removeEvents = window.desktopPet.onTranslationEvent((event) => {
             setTranslation((current) => translationBubbleReducer(current, event));
             if (event.type === 'completed')
@@ -386,7 +418,14 @@ function PetApp(): React.JSX.Element {
     }, [emitMascotEvents, startScreenshotTranslation, startTranslation]);
 
     return (
-        <PetWindow eventBatch={mascotEvents} eventBatchId={mascotBatchId}>
+        <PetWindow
+            eventBatch={mascotEvents}
+            eventBatchId={mascotBatchId}
+            performance={performanceMode === undefined ? undefined : {
+                reason: performanceMode.reason,
+                suppressed: performanceMode.suppressed
+            }}
+        >
             <main>
                 <h1>Desktop Pet Translator</h1>
                 <button type="button" disabled={translationBusy} onClick={() => void startTranslation()}>
