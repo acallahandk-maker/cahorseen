@@ -6,6 +6,12 @@ import {
     providerDeleteSchema,
     providerSaveConfigSchema,
     providerSummarySchema,
+    quizAnswerRequestSchema,
+    quizFeedbackSchema,
+    quizIpcChannels,
+    quizPreferencesPatchSchema,
+    quizQuestionRequestSchema,
+    quizQuestionSchema,
     selectionCaptureStartSchema,
     selectionCaptureSchema,
     screenBoundsSchema,
@@ -25,6 +31,9 @@ import {
     type ProviderDetails,
     type ProviderSaveConfig,
     type ProviderSummary,
+    type QuizApi,
+    type QuizFeedback,
+    type QuizPreferencesPatch,
     type SelectionCapture,
     type ScreenBounds,
     type SettingsPreferences,
@@ -53,6 +62,7 @@ const pingResponseSchema = z.object({
 export interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
     vocabulary: VocabularyRepositoryFacade;
+    quiz: QuizApi;
     captureSelectionOnce: (taskId: string) => Promise<SelectionCapture>;
     translateSelection: (options?: {
         taskId?: string;
@@ -93,6 +103,36 @@ const desktopPetApi: DesktopPetApi = {
     vocabulary: createVocabularyApi(async (channel, payload) => (
         ipcRenderer.invoke(channel, payload)
     )),
+    quiz: {
+        selectQuizQuestions: async (count = 1) => {
+            const request = quizQuestionRequestSchema.parse({ count });
+            return parseIpcResult(
+                z.array(quizQuestionSchema),
+                await ipcRenderer.invoke(quizIpcChannels.selectQuestions, request)
+            );
+        },
+        recordQuizAnswer: async (
+            questionId: string,
+            optionIndex?: number | null
+        ): Promise<QuizFeedback> => {
+            const request = quizAnswerRequestSchema.parse({
+                questionId,
+                optionIndex
+            });
+            return parseIpcResult(
+                quizFeedbackSchema,
+                await ipcRenderer.invoke(quizIpcChannels.recordAnswer, request)
+            );
+        },
+        setQuizPreferences: async (
+            preferences: QuizPreferencesPatch
+        ): Promise<void> => {
+            const request = quizPreferencesPatchSchema.parse(preferences);
+            parseIpcAck(
+                await ipcRenderer.invoke(quizIpcChannels.setPreferences, request)
+            );
+        }
+    },
     captureSelectionOnce: async (taskId) => {
         const request = selectionCaptureStartSchema.parse({ taskId });
         return parseIpcResult(

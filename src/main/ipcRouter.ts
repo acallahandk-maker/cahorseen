@@ -13,6 +13,12 @@ import {
     memoryErrorCodeSchema,
     memoryFilterSchema,
     memoryIpcChannels,
+    quizAnswerRequestSchema,
+    quizFeedbackSchema,
+    quizIpcChannels,
+    quizPreferencesPatchSchema,
+    quizQuestionRequestSchema,
+    quizQuestionSchema,
     providerDetailsSchema,
     providerErrorCodeSchema,
     providerSaveConfigSchema,
@@ -39,6 +45,9 @@ import {
     type ScreenBounds,
     type SelectionCapture,
     type MemoryErrorCode,
+    type QuizApi,
+    type QuizFeedback,
+    type QuizQuestion,
     type VocabularyRepositoryFacade,
     type SettingsPreferences,
     type SettingsState,
@@ -90,6 +99,7 @@ export interface ScreenshotIpcService {
 }
 
 export type MemoryIpcService = VocabularyRepositoryFacade;
+export type QuizIpcService = QuizApi;
 
 export interface IpcMainLike {
     handle(channel: string, listener: (event: unknown, payload?: unknown) => unknown): void;
@@ -102,8 +112,10 @@ export interface RegisterIpcRouterOptions {
     selection?: SelectionIpcService;
     screenshot?: ScreenshotIpcService;
     memory?: MemoryIpcService;
+    quiz?: QuizIpcService;
     isSenderAuthorized?: (event: unknown) => boolean;
     openSettings?: () => void;
+    onActiveTranslationChange?: (active: boolean) => void;
 }
 
 type IpcFailure = {
@@ -113,6 +125,8 @@ type IpcFailure = {
             | 'unauthorized'
             | 'invalid-request'
             | 'request-failed'
+            | 'paused'
+            | 'suppressed'
             | MemoryErrorCode
             | ProviderErrorCode
             | TranslationError['code'];
@@ -232,6 +246,21 @@ function safeMemoryFailure(error: unknown): IpcFailure {
     return failure('request-failed', 'Vocabulary request failed.');
 }
 
+function safeQuizFailure(error: unknown): IpcFailure {
+    const code = error instanceof Error
+        ? (error as Error & { code?: unknown }).code
+        : undefined;
+    if (code === 'paused')
+        return failure('paused', 'Quiz answering is paused.');
+    if (code === 'suppressed')
+        return failure('suppressed', 'Quiz interaction is suppressed.');
+    if (code === 'not-found')
+        return failure('not-found', 'Quiz question was not found.');
+    if (code === 'invalid-request')
+        return failure('invalid-request', 'Quiz request is invalid.');
+    return failure('request-failed', 'Quiz request failed.');
+}
+
 function translationTaskErrorCode(
     code: IpcFailure['error']['code']
 ): TranslationError['code'] {
@@ -347,9 +376,19 @@ function failedScreenshotTask(
 }
 
 export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void {
-    const { ipcMain, secureConfig, selection, screenshot, memory } = options;
+    const {
+        ipcMain,
+        secureConfig,
+        selection,
+        screenshot,
+        memory,
+        quiz
+    } = options;
     const isSenderAuthorized = options.isSenderAuthorized ?? defaultIsSenderAuthorized;
     const activeTasks = new Map<string, ActiveTaskRecord>();
+    const updateTranslationActivity = (): void => {
+        options.onActiveTranslationChange?.(activeTasks.size > 0);
+    };
     const createActiveTask = (
         taskId: string,
         event: unknown,
@@ -366,7 +405,12 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
             terminalSent: false
         };
         activeTasks.set(taskId, record);
+        updateTranslationActivity();
         return record;
+    };
+    const removeActiveTask = (taskId: string): void => {
+        activeTasks.delete(taskId);
+        updateTranslationActivity();
     };
     const sendStarted = (record: ActiveTaskRecord): void => {
         if (record.terminalSent)
@@ -690,6 +734,61 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         });
     }
 
+    if (quiz !== undefined) {
+        ipcMain.handle(quizIpcChannels.selectQuestions, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = quizQuestionRequestSchema.safeParse(payload ?? {});
+            if (!parsed.success)
+                return failure('invalid-request', 'Quiz selection request is invalid.');
+            try {
+                const questions = await quiz.selectQuizQuestions(parsed.data.count ?? 1);
+                return {
+                    ok: true,
+                    value: z.array(quizQuestionSchema).parse(questions)
+                } satisfies IpcSuccess<QuizQuestion[]>;
+            } catch (error) {
+                return safeQuizFailure(error);
+            }
+        });
+
+        ipcMain.handle(quizIpcChannels.recordAnswer, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = quizAnswerRequestSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Quiz answer request is invalid.');
+            try {
+                const feedback = await quiz.recordQuizAnswer(
+                    parsed.data.questionId,
+                    parsed.data.optionIndex === -1
+                        ? null
+                        : parsed.data.optionIndex
+                );
+                return {
+                    ok: true,
+                    value: quizFeedbackSchema.parse(feedback)
+                } satisfies IpcSuccess<QuizFeedback>;
+            } catch (error) {
+                return safeQuizFailure(error);
+            }
+        });
+
+        ipcMain.handle(quizIpcChannels.setPreferences, async (event, payload) => {
+            if (!isSenderAuthorized(event))
+                return failure('unauthorized', 'IPC sender is not authorized.');
+            const parsed = quizPreferencesPatchSchema.safeParse(payload);
+            if (!parsed.success)
+                return failure('invalid-request', 'Quiz preferences are invalid.');
+            try {
+                await quiz.setQuizPreferences(parsed.data);
+                return { ok: true } satisfies IpcSaveSuccess;
+            } catch (error) {
+                return safeQuizFailure(error);
+            }
+        });
+    }
+
     if (selection !== undefined) {
         ipcMain.handle(translationIpcChannels.captureSelection, async (event, payload) => {
             if (!isSenderAuthorized(event))
@@ -717,7 +816,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 return safeSelectionFailure(error);
             } finally {
                 if (record.cancelled || record.sourceText === undefined)
-                    activeTasks.delete(taskId);
+                removeActiveTask(taskId);
             }
         });
 
@@ -815,7 +914,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } finally {
                 if (activeTasks.get(taskId) === record)
-                    activeTasks.delete(taskId);
+                removeActiveTask(taskId);
             }
         });
 
@@ -887,7 +986,7 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
                 return { ok: true, value: task } satisfies IpcSuccess<TranslationTask>;
             } finally {
                 if (activeTasks.get(taskId) === record)
-                    activeTasks.delete(taskId);
+                removeActiveTask(taskId);
             }
         });
     }
@@ -924,6 +1023,9 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         ipcMain.removeHandler(memoryIpcChannels.deleteEntries);
         ipcMain.removeHandler(memoryIpcChannels.exportEntries);
         ipcMain.removeHandler(memoryIpcChannels.setMemoryEnabled);
+        ipcMain.removeHandler(quizIpcChannels.selectQuestions);
+        ipcMain.removeHandler(quizIpcChannels.recordAnswer);
+        ipcMain.removeHandler(quizIpcChannels.setPreferences);
         ipcMain.removeHandler(translationIpcChannels.captureSelection);
         ipcMain.removeHandler(translationIpcChannels.translateSelection);
         ipcMain.removeHandler(screenshotIpcChannels.translate);
@@ -931,5 +1033,6 @@ export function registerIpcRouter(options: RegisterIpcRouterOptions): () => void
         for (const record of activeTasks.values())
             record.controller.abort();
         activeTasks.clear();
+        updateTranslationActivity();
     };
 }

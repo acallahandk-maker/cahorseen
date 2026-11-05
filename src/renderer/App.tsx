@@ -7,10 +7,13 @@ import type {
     TranslationEvent,
     TranslationRetryInput,
     TranslationTask,
+    QuizQuestion,
+    QuizApi,
     VocabularyRepositoryFacade
 } from '../shared/contracts';
 import { translationErrorCodeSchema } from '../shared/contracts';
 import PetWindow from './pet/PetWindow';
+import QuizBubble from './pet/QuizBubble';
 import RegionSelector from './screenshot/RegionSelector';
 import SettingsWindow from './settings/SettingsWindow';
 import TranslationBubble from './translation/TranslationBubble';
@@ -24,6 +27,7 @@ import {
 interface DesktopPetApi {
     ping: () => Promise<{ version: string }>;
     vocabulary: VocabularyRepositoryFacade;
+    quiz: QuizApi;
     captureSelectionOnce: (taskId: string) => Promise<SelectionCapture>;
     translateSelection: (options?: {
         taskId?: string;
@@ -149,12 +153,27 @@ function PetApp(): React.JSX.Element {
     const translationRef = useRef(translation);
     translationRef.current = translation;
     const cancelledTaskIdsRef = useRef(new Set<string>());
+    const [quizQuestion, setQuizQuestion] = useState<QuizQuestion>();
+    const [quizPaused, setQuizPaused] = useState(false);
+    const quizPausedRef = useRef(false);
     const [mascotEvents, setMascotEvents] = useState<readonly MascotEvent[]>([]);
     const [mascotBatchId, setMascotBatchId] = useState(0);
     const emitMascotEvents = useCallback((events: readonly MascotEvent[]): void => {
         setMascotEvents(events);
         setMascotBatchId((current) => current + 1);
     }, []);
+    const loadQuiz = useCallback(async (): Promise<void> => {
+        if (translationBusyRef.current || quizPausedRef.current)
+            return;
+        try {
+            const [question] = await window.desktopPet.quiz.selectQuizQuestions(1);
+            setQuizQuestion(question);
+            if (question !== undefined)
+                emitMascotEvents(['quizzing']);
+        } catch {
+            setQuizQuestion(undefined);
+        }
+    }, [emitMascotEvents]);
     const runTranslationExclusive = useCallback(async (
         operation: () => Promise<void>
     ): Promise<void> => {
@@ -162,13 +181,15 @@ function PetApp(): React.JSX.Element {
             return;
         translationBusyRef.current = true;
         setTranslationBusy(true);
+        setQuizQuestion(undefined);
         try {
             await operation();
         } finally {
             translationBusyRef.current = false;
             setTranslationBusy(false);
+            void loadQuiz();
         }
-    }, []);
+    }, [loadQuiz]);
     const runSelectionTranslation = useCallback(async (): Promise<void> => {
         const taskId = globalThis.crypto?.randomUUID?.()
             ?? `selection-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -324,6 +345,10 @@ function PetApp(): React.JSX.Element {
     }, []);
 
     useEffect(() => {
+        void loadQuiz();
+    }, [loadQuiz]);
+
+    useEffect(() => {
         const removeEvents = window.desktopPet.onTranslationEvent((event) => {
             setTranslation((current) => translationBubbleReducer(current, event));
             if (event.type === 'completed')
@@ -369,6 +394,33 @@ function PetApp(): React.JSX.Element {
                         void window.desktopPet.cancelTranslation(taskId).catch(() => undefined);
                     }}
                 />
+                {quizQuestion === undefined ? null : (
+                    <QuizBubble
+                        question={quizQuestion}
+                        paused={quizPaused}
+                        onAnswer={(optionIndex) => (
+                            window.desktopPet.quiz.recordQuizAnswer(
+                                quizQuestion.id,
+                                optionIndex
+                            )
+                        )}
+                        onSkip={() => (
+                            window.desktopPet.quiz.recordQuizAnswer(
+                                quizQuestion.id,
+                                null
+                            )
+                        )}
+                        onPauseChange={async (paused) => {
+                            await window.desktopPet.quiz.setQuizPreferences({ paused });
+                            quizPausedRef.current = paused;
+                            setQuizPaused(paused);
+                            if (!paused)
+                                await loadQuiz();
+                        }}
+                        onNext={loadQuiz}
+                        onMascotEvent={(event) => emitMascotEvents([event])}
+                    />
+                )}
             </main>
         </PetWindow>
     );

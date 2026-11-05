@@ -238,6 +238,11 @@ interface PendingRecord {
     reject: (error: MemoryDatabaseError) => void;
 }
 
+export interface QuizScheduleUpdate {
+    quizIntervalDays: number;
+    nextDueAt: string;
+}
+
 function toEpochMilliseconds(value: Date | string): number {
     const milliseconds = value instanceof Date ? value.getTime() : Date.parse(value);
     if (!Number.isFinite(milliseconds))
@@ -399,6 +404,17 @@ export class MemoryDatabase {
         const response = await this.send(request);
         if (response.operation !== 'updateEntry' || !response.result.updated)
             throw new MemoryDatabaseError('not-found', 'The vocabulary entry was not found.');
+    }
+
+    async updateQuizSchedule(
+        id: string,
+        update: QuizScheduleUpdate
+    ): Promise<void> {
+        const parsed = z.strictObject({
+            quizIntervalDays: positiveInteger,
+            nextDueAt: z.string().datetime({ offset: true })
+        }).parse(update);
+        await this.updateEntry(id, parsed);
     }
 
     async deleteEntries(ids: string[]): Promise<void> {
@@ -629,6 +645,13 @@ export async function getMemoryEnabled(): Promise<boolean> {
 
 export async function updateEntry(id: string, patch: MemoryEntryPatch): Promise<void> {
     await (await getDefaultDatabase()).updateEntry(id, patch);
+}
+
+export async function updateQuizSchedule(
+    id: string,
+    update: QuizScheduleUpdate
+): Promise<void> {
+    await (await getDefaultDatabase()).updateQuizSchedule(id, update);
 }
 
 export async function deleteEntries(ids: string[]): Promise<void> {

@@ -23,7 +23,8 @@ const transitions: Readonly<Record<MascotState, Readonly<Partial<Record<MascotEv
     error: {},
     quizzing: {
         happy: 'happy',
-        sad: 'sad'
+        sad: 'sad',
+        idle: 'idle'
     },
     happy: {
         idle: 'idle'

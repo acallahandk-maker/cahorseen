@@ -248,6 +248,36 @@ export const quizFeedbackSchema = z.strictObject({
     nextDueAt: timestamp
 });
 
+export const quizFrequencyWeightsSchema = z.strictObject({
+    occurrenceCount: z.number().min(0).max(100),
+    recentOccurrenceCount: z.number().min(0).max(100)
+});
+
+export const quizPreferencesSchema = z.strictObject({
+    paused: z.boolean(),
+    frequencyWeights: quizFrequencyWeightsSchema
+});
+
+export const quizPreferencesPatchSchema = z.strictObject({
+    paused: z.boolean().optional(),
+    frequencyWeights: quizFrequencyWeightsSchema.optional()
+}).refine((preferences) => Object.keys(preferences).length > 0, {
+    message: 'At least one quiz preference must be supplied'
+});
+
+export const quizQuestionRequestSchema = z.strictObject({
+    count: z.number().int().min(1).max(20).optional()
+});
+
+export const quizAnswerRequestSchema = z.strictObject({
+    questionId: nonEmptyString,
+    optionIndex: z.union([
+        z.number().int().min(0).max(3),
+        z.literal(-1),
+        z.null()
+    ]).optional()
+});
+
 export const providerErrorCodeSchema = z.enum([
     'invalid-config',
     'invalid-request',
@@ -470,6 +500,12 @@ export const memoryIpcChannels = {
     setMemoryEnabled: 'desktop-pet:memory-set-enabled'
 } as const;
 
+export const quizIpcChannels = {
+    selectQuestions: 'desktop-pet:quiz-select-questions',
+    recordAnswer: 'desktop-pet:quiz-record-answer',
+    setPreferences: 'desktop-pet:quiz-set-preferences'
+} as const;
+
 export const settingsPreferencesSchema = z.strictObject({
     hotkey: z.string().min(1).max(64).refine(isValidHotkey, {
         message: 'Use one or more modifiers plus exactly one key.'
@@ -631,6 +667,9 @@ export type MemoryEntry = z.infer<typeof memoryEntrySchema>;
 export type MemoryPersistenceStatus = z.infer<typeof memoryPersistenceStatusSchema>;
 export type QuizQuestion = z.infer<typeof quizQuestionSchema>;
 export type QuizFeedback = z.infer<typeof quizFeedbackSchema>;
+export type QuizFrequencyWeights = z.infer<typeof quizFrequencyWeightsSchema>;
+export type QuizPreferences = z.infer<typeof quizPreferencesSchema>;
+export type QuizPreferencesPatch = z.infer<typeof quizPreferencesPatchSchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type ProviderErrorCode = z.infer<typeof providerErrorCodeSchema>;
 export type SelectionCapture = z.infer<typeof selectionCaptureSchema>;
@@ -652,4 +691,13 @@ export interface VocabularyRepositoryFacade {
     deleteEntries(ids: string[]): Promise<void>;
     exportEntries(format: MemoryExportFormat): Promise<string>;
     setMemoryEnabled(enabled: boolean): Promise<void>;
+}
+
+export interface QuizApi {
+    selectQuizQuestions(count?: number): Promise<QuizQuestion[]>;
+    recordQuizAnswer(
+        questionId: string,
+        optionIndex?: number | null
+    ): Promise<QuizFeedback>;
+    setQuizPreferences(preferences: QuizPreferencesPatch): Promise<void>;
 }

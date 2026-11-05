@@ -43,8 +43,11 @@ import {
     listEntries,
     queryHeat,
     setMemoryEnabled,
-    updateEntry
+    updateEntry,
+    updateQuizSchedule
 } from './services/memoryDatabase';
+import { QuizScheduler } from './services/quizScheduler';
+import { SystemIntegration } from './systemIntegration';
 
 const pingChannel = 'desktop-pet:ping';
 
@@ -99,6 +102,17 @@ function getScreenshotOverlayUrl(): string {
 app.whenReady().then(() => {
     ipcMain.handle(pingChannel, () => ({ version: app.getVersion() }));
     let petWindow = createWindow();
+    const systemIntegration = new SystemIntegration();
+    const quizScheduler = new QuizScheduler({
+        repository: {
+            listEntries,
+            updateQuizSchedule
+        },
+        canStartQuiz: () => systemIntegration.canStartQuiz(),
+        canAnswerQuiz: () => systemIntegration.canAnswerQuiz()
+    });
+    petWindow.on('enter-full-screen', () => systemIntegration.setFullscreen(true));
+    petWindow.on('leave-full-screen', () => systemIntegration.setFullscreen(false));
     let settingsWindow: BrowserWindow | undefined;
     const openSettingsWindow = (): void => {
         if (settingsWindow !== undefined && !settingsWindow.isDestroyed()) {
@@ -156,6 +170,10 @@ app.whenReady().then(() => {
             deleteEntries,
             exportEntries,
             setMemoryEnabled
+        },
+        quiz: quizScheduler,
+        onActiveTranslationChange: (active) => {
+            systemIntegration.setActiveTranslation(active);
         },
         isSenderAuthorized: (event) => {
             const senderFrame = (
