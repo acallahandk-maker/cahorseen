@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+    act,
+    cleanup,
+    fireEvent,
+    render,
+    screen,
+    waitFor,
+    within
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { act, useState } from 'react';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SettingsWindow from '../../src/renderer/settings/SettingsWindow';
 import {
@@ -143,6 +151,17 @@ function deferred<T>(): {
         reject = fail;
     });
     return { promise, resolve, reject };
+}
+
+async function settleDeferredAndFlush<T>(
+    pending: { resolve: (value: T) => void; promise: Promise<T> },
+    value: T
+): Promise<void> {
+    await act(async () => {
+        pending.resolve(value);
+        await pending.promise;
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
 }
 
 afterEach(() => {
@@ -596,8 +615,7 @@ describe('VocabularyHeatView', () => {
         expect(screen.queryByText('Beta source')).toBeNull();
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
-        staleMemoryState.resolve(true);
-        await staleMemoryState.promise;
+        await settleDeferredAndFlush(staleMemoryState, true);
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
         expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
@@ -654,8 +672,7 @@ describe('VocabularyHeatView', () => {
         expect(screen.queryByText('Beta source')).toBeNull();
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
-        staleMemoryState.resolve(true);
-        await staleMemoryState.promise;
+        await settleDeferredAndFlush(staleMemoryState, true);
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
         expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
@@ -691,9 +708,39 @@ describe('VocabularyHeatView', () => {
         await user.click(screen.getByRole('button', { name: '7 days' }));
         await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(2));
         view.unmount();
-        staleMemoryState.resolve(false);
-        await staleMemoryState.promise;
+        await settleDeferredAndFlush(staleMemoryState, false);
         expect(consoleError).not.toHaveBeenCalled();
+    });
+
+    it('ignores stale memory state after a newer repository request', async () => {
+        const user = userEvent.setup();
+        const staleMemoryState = deferred<boolean>();
+        const newerMemoryState = deferred<boolean>();
+        const getMemoryEnabled = vi.fn()
+            .mockResolvedValueOnce(true)
+            .mockImplementationOnce(() => staleMemoryState.promise)
+            .mockImplementationOnce(() => newerMemoryState.promise);
+        render(
+            <VocabularyHeatView
+                statistics={statisticsFixture()}
+                entries={entriesFixture()}
+                now={now}
+                repository={repositoryFixture({ getMemoryEnabled })}
+            />
+        );
+
+        await screen.findByRole('button', { name: 'Delete Alpha source' });
+        await user.click(screen.getByRole('button', { name: '7 days' }));
+        await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(2));
+        await user.click(screen.getByRole('button', { name: '30 days' }));
+        await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(3));
+
+        await settleDeferredAndFlush(newerMemoryState, true);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', false);
+        await settleDeferredAndFlush(staleMemoryState, false);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', false);
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory active');
     });
 
     it('virtualizes long rows while preserving accessible table positions', () => {

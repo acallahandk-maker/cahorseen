@@ -386,7 +386,9 @@ export function VocabularyHeatView({
         const memoryStateRequest = Promise.resolve()
             .then(() => repository.getMemoryEnabled())
             .then((memoryEnabled) => {
-                if (!memoryStateStartedDuringPauseMutation
+                if (mountedRef.current
+                    && generation === requestGeneration.current
+                    && !memoryStateStartedDuringPauseMutation
                     && !pauseMutationInFlightRef.current
                     && memoryStateVersion === memoryStateGeneration.current)
                     setMemoryPaused(!memoryEnabled);
