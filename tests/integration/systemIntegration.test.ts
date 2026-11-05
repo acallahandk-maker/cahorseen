@@ -23,8 +23,11 @@ interface TrayLike {
 interface PowerMonitorLike {
     isOnBatteryPower(): boolean;
     getSystemIdleState(idleThreshold: number): 'active' | 'idle' | 'locked' | 'unknown';
-    on(event: 'suspend' | 'resume', listener: () => void): unknown;
-    removeListener(event: 'suspend' | 'resume', listener: () => void): unknown;
+    on(event: 'suspend' | 'resume' | 'on-ac' | 'on-battery', listener: () => void): unknown;
+    removeListener(
+        event: 'suspend' | 'resume' | 'on-ac' | 'on-battery',
+        listener: () => void
+    ): unknown;
 }
 
 interface FullscreenProbeLike {
@@ -63,7 +66,7 @@ interface SystemIntegrationApi {
         frameRate: 0 | 10 | 30;
         suppressed: boolean;
     };
-    dispose(): void;
+    dispose(): Promise<void>;
 }
 
 class FakeShortcutRegistrar implements ShortcutRegistrarLike {
@@ -91,7 +94,10 @@ class FakePowerMonitor implements PowerMonitorLike {
     idleReads = 0;
     onBattery = false;
     idleState: 'active' | 'idle' | 'locked' | 'unknown' = 'active';
-    readonly listeners = new Map<'suspend' | 'resume', Set<() => void>>();
+    readonly listeners = new Map<
+        'suspend' | 'resume' | 'on-ac' | 'on-battery',
+        Set<() => void>
+    >();
 
     isOnBatteryPower(): boolean {
         ++this.batteryReads;
@@ -104,19 +110,25 @@ class FakePowerMonitor implements PowerMonitorLike {
         return this.idleState;
     }
 
-    on(event: 'suspend' | 'resume', listener: () => void): unknown {
+    on(
+        event: 'suspend' | 'resume' | 'on-ac' | 'on-battery',
+        listener: () => void
+    ): unknown {
         const listeners = this.listeners.get(event) ?? new Set<() => void>();
         listeners.add(listener);
         this.listeners.set(event, listeners);
         return this;
     }
 
-    removeListener(event: 'suspend' | 'resume', listener: () => void): unknown {
+    removeListener(
+        event: 'suspend' | 'resume' | 'on-ac' | 'on-battery',
+        listener: () => void
+    ): unknown {
         this.listeners.get(event)?.delete(listener);
         return this;
     }
 
-    emit(event: 'suspend' | 'resume'): void {
+    emit(event: 'suspend' | 'resume' | 'on-ac' | 'on-battery'): void {
         for (const listener of this.listeners.get(event) ?? [])
             listener();
     }
@@ -231,6 +243,16 @@ describe('SystemIntegration shortcuts', () => {
         expect(harness.shortcuts.listeners.size).toBe(0);
     });
 
+    it('normalizes modifier order and aliases before conflict checks', async () => {
+        const harness = createHarness();
+
+        await expect(harness.integration.registerShortcuts({
+            selection: 'Shift+Ctrl+T',
+            screenshot: 'Control+shift+t'
+        })).rejects.toThrow(/unique|conflict/i);
+        expect(harness.shortcuts.listeners.size).toBe(0);
+    });
+
     it('rejects unavailable accelerators without leaking partial registrations', async () => {
         const harness = createHarness();
         harness.shortcuts.failed.add('Control+Shift+S');
@@ -308,14 +330,71 @@ describe('SystemIntegration shutdown', () => {
         });
         const refresh = harness.integration.refreshSystemState();
 
-        harness.integration.dispose();
-        harness.integration.dispose();
+        await harness.integration.dispose();
+        await harness.integration.dispose();
         await refresh;
 
         expect(harness.shortcuts.listeners.size).toBe(0);
         expect(harness.tray.destroyed).toBe(true);
         expect(harness.powerMonitor.listenerCount()).toBe(0);
         expect(harness.probe.aborts).toBe(1);
+    });
+});
+
+describe('SystemIntegration settings transactions', () => {
+    it('restores shortcut and suppression runtime state when persistence fails', async () => {
+        const harness = createHarness();
+        await harness.integration.registerShortcuts({
+            selection: 'Ctrl+Shift+T',
+            screenshot: 'Ctrl+Shift+S'
+        });
+        await harness.integration.setSuppressionPolicy({
+            reduceMotion: false,
+            pauseWhenFullscreen: true,
+            limitFrameRate: true
+        });
+        const applySettings = (
+            harness.integration as unknown as {
+                applySettings?: (
+                    preferences: {
+                        hotkey: string;
+                        screenshotHotkey: string;
+                        performance: {
+                            reduceMotion: boolean;
+                            pauseWhenFullscreen: boolean;
+                            limitFrameRate: boolean;
+                        };
+                    },
+                    persist: () => Promise<unknown>
+                ) => Promise<unknown>;
+            }
+        ).applySettings;
+        expect(applySettings).toBeTypeOf('function');
+
+        await expect(applySettings?.call(
+            harness.integration,
+            {
+                hotkey: 'Alt+S',
+                screenshotHotkey: 'Alt+P',
+                performance: {
+                    reduceMotion: true,
+                    pauseWhenFullscreen: false,
+                    limitFrameRate: true
+                }
+            },
+            async () => {
+                throw new Error('Settings persistence failed.');
+            }
+        )).rejects.toThrow(/persistence failed/i);
+        expect([...harness.shortcuts.listeners.keys()]).toEqual([
+            'Control+Shift+T',
+            'Control+Shift+S'
+        ]);
+        expect(harness.integration.getPerformanceMode()).toEqual({
+            reason: 'normal',
+            frameRate: 30,
+            suppressed: false
+        });
     });
 });
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
     isValidHotkey,
+    normalizeHotkey,
     settingsPreferencesSchema,
     type ConnectionTestResult,
     type ProviderDetails,
@@ -102,19 +103,7 @@ function normalizeKey(value: string): string {
 }
 
 function canonicalHotkey(value: string): string {
-    return value
-        .split('+')
-        .map((part) => part.trim())
-        .filter(Boolean)
-        .map((part) => {
-            const lower = part.toLowerCase();
-            if (lower === 'ctrl' || lower === 'control')
-                return 'control';
-            if (lower === 'meta' || lower === 'os' || lower === 'super')
-                return 'super';
-            return part.length === 1 ? part.toUpperCase() : part;
-        })
-        .join('+');
+    return normalizeHotkey(value) ?? value.toLowerCase();
 }
 
 export function hotkeyFromEvent(event: HotkeyEventLike): string {

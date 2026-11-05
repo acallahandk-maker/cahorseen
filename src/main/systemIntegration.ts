@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import {
-    isValidHotkey,
+    normalizeHotkey,
     type PerformanceMode,
-    type SettingsPreferences
+    type SettingsPreferences,
+    type SettingsState
 } from '../shared/contracts';
 import {
     resolvePerformanceMode,
@@ -43,11 +44,17 @@ export interface TrayLike {
     destroy(): void;
 }
 
+export type PowerMonitorEvent =
+    | 'suspend'
+    | 'resume'
+    | 'on-ac'
+    | 'on-battery';
+
 export interface PowerMonitorLike {
     isOnBatteryPower(): boolean;
     getSystemIdleState(idleThreshold: number): 'active' | 'idle' | 'locked' | 'unknown';
-    on(event: 'suspend' | 'resume', listener: () => void): unknown;
-    removeListener(event: 'suspend' | 'resume', listener: () => void): unknown;
+    on(event: PowerMonitorEvent, listener: () => void): unknown;
+    removeListener(event: PowerMonitorEvent, listener: () => void): unknown;
 }
 
 export interface FullscreenProbe {
@@ -59,11 +66,21 @@ export type FullscreenProbeExecFile = (
     args: string[],
     options: {
         encoding: 'utf8';
+        killSignal: 'SIGTERM';
         signal: AbortSignal;
+        timeout: number;
         windowsHide: true;
     },
     callback: (error: Error | null, stdout: string) => void
-) => void;
+) => FullscreenProbeChild;
+
+export interface FullscreenProbeChild {
+    kill(signal?: NodeJS.Signals | number): boolean;
+    once(
+        event: 'exit',
+        listener: (code: number | null, signal: NodeJS.Signals | null) => void
+    ): unknown;
+}
 
 export interface WindowsFullscreenProbeOptions {
     platform?: NodeJS.Platform;
@@ -97,6 +114,32 @@ export interface SystemIntegrationOptions {
     onExit(): void;
     onPerformanceChange?(mode: PerformanceMode): void;
     idleThresholdSeconds?: number;
+    systemStatePollIntervalMs?: number;
+}
+
+export type PerformanceWindowEvent =
+    | 'enter-full-screen'
+    | 'leave-full-screen'
+    | 'hide'
+    | 'show';
+
+export interface PerformanceWindowEvents {
+    on(event: PerformanceWindowEvent, listener: () => void): unknown;
+}
+
+export interface PerformanceWindowState {
+    setFullscreen(fullscreen: boolean): void;
+    setHidden(hidden: boolean): void;
+}
+
+export function configurePerformanceWindowEvents(
+    windowEvents: PerformanceWindowEvents,
+    state: PerformanceWindowState
+): void {
+    windowEvents.on('enter-full-screen', () => state.setFullscreen(true));
+    windowEvents.on('leave-full-screen', () => state.setFullscreen(false));
+    windowEvents.on('hide', () => state.setHidden(true));
+    windowEvents.on('show', () => state.setHidden(false));
 }
 
 export function shouldSuppressQuizInterruptions(
@@ -105,28 +148,6 @@ export function shouldSuppressQuizInterruptions(
     return state.fullscreen
         || state.activeTranslation
         || state.intenseInput;
-}
-
-function normalizeAccelerator(value: string): string {
-    return value
-        .split('+')
-        .map((part) => part.trim())
-        .filter(Boolean)
-        .map((part) => {
-            const lower = part.toLowerCase();
-            if (lower === 'ctrl' || lower === 'control')
-                return 'Control';
-            if (lower === 'meta' || lower === 'os' || lower === 'super')
-                return 'Super';
-            if (lower === 'alt' || lower === 'shift') {
-                const first = part[0];
-                return first === undefined
-                    ? part
-                    : first.toUpperCase() + part.slice(1).toLowerCase();
-            }
-            return part.length === 1 ? part.toUpperCase() : part;
-        })
-        .join('+');
 }
 
 function normalizeSettingsPolicy(
@@ -227,38 +248,106 @@ export function createWindowsFullscreenProbe(
                 '} | ConvertTo-Json -Compress'
             ].join('\n');
             return await new Promise<{ fullscreen: boolean }>((resolve, reject) => {
-                runExecFile('powershell.exe', [
-                    '-NoProfile',
-                    '-NonInteractive',
-                    '-EncodedCommand',
-                    Buffer.from(script, 'utf16le').toString('base64')
-                ], {
-                    encoding: 'utf8',
-                    signal,
-                    windowsHide: true
-                }, (error, stdout) => {
-                    if (error !== null) {
-                        reject(error);
+                let child: FullscreenProbeChild | undefined;
+                let exited = false;
+                let settled = false;
+                const cleanup = (): void => {
+                    signal.removeEventListener('abort', handleAbort);
+                };
+                const resolveOnce = (value: { fullscreen: boolean }): void => {
+                    if (settled)
                         return;
-                    }
-                    try {
-                        const normalized = stdout.trim();
-                        if (normalized === '0') {
-                            resolve({ fullscreen: false });
+                    settled = true;
+                    cleanup();
+                    resolve(value);
+                };
+                const rejectOnce = (error: Error): void => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    cleanup();
+                    reject(error);
+                };
+                const abortError = (): Error => {
+                    const error = new Error('Windows fullscreen probe was aborted.');
+                    error.name = 'AbortError';
+                    return error;
+                };
+                const finishAbort = (): void => {
+                    if (exited)
+                        rejectOnce(abortError());
+                };
+                const handleExit = (): void => {
+                    exited = true;
+                    finishAbort();
+                };
+                function handleAbort(): void {
+                    if (settled)
+                        return;
+                    if (child !== undefined && !exited) {
+                        try {
+                            child.kill('SIGTERM');
+                        } catch (error) {
+                            rejectOnce(error instanceof Error ? error : new Error(String(error)));
                             return;
                         }
-                        resolve({
-                            fullscreen: isWindowsFullscreenWindow(
-                                parseFullscreenSnapshot(JSON.parse(normalized))
-                            )
-                        });
-                    } catch (parseError) {
-                        reject(parseError);
                     }
-                });
+                    finishAbort();
+                }
+                signal.addEventListener('abort', handleAbort, { once: true });
+                try {
+                    child = runExecFile('powershell.exe', [
+                        '-NoProfile',
+                        '-NonInteractive',
+                        '-EncodedCommand',
+                        Buffer.from(script, 'utf16le').toString('base64')
+                    ], {
+                        encoding: 'utf8',
+                        killSignal: 'SIGTERM',
+                        signal,
+                        timeout: 5_000,
+                        windowsHide: true
+                    }, (error, stdout) => {
+                        if (signal.aborted) {
+                            finishAbort();
+                            return;
+                        }
+                        if (error !== null) {
+                            rejectOnce(error);
+                            return;
+                        }
+                        try {
+                            const normalized = stdout.trim();
+                            if (normalized === '0') {
+                                resolveOnce({ fullscreen: false });
+                                return;
+                            }
+                            resolveOnce({
+                                fullscreen: isWindowsFullscreenWindow(
+                                    parseFullscreenSnapshot(JSON.parse(normalized))
+                                )
+                            });
+                        } catch (parseError) {
+                            rejectOnce(parseError instanceof Error
+                                ? parseError
+                                : new Error(String(parseError)));
+                        }
+                    });
+                    if (!settled)
+                        child.once('exit', handleExit);
+                    if (signal.aborted)
+                        handleAbort();
+                } catch (error) {
+                    rejectOnce(error instanceof Error ? error : new Error(String(error)));
+                }
             });
         }
     };
+}
+
+interface PendingSystemRead {
+    controller: AbortController;
+    promise: Promise<unknown>;
 }
 
 export class SystemIntegration {
@@ -279,14 +368,20 @@ export class SystemIntegration {
         pauseWhenFullscreen: true,
         limitFrameRate: true
     };
-    private pendingRead: AbortController | undefined;
+    private readonly pendingReads = new Set<PendingSystemRead>();
+    private systemStateTimer: ReturnType<typeof setInterval> | undefined;
+    private settingsTransaction: Promise<unknown> = Promise.resolve();
+    private disposePromise: Promise<void> | undefined;
     private disposed = false;
 
     constructor(options: SystemIntegrationOptions) {
         this.options = options;
         this.options.powerMonitor.on('suspend', this.handleSuspend);
         this.options.powerMonitor.on('resume', this.handleResume);
+        this.options.powerMonitor.on('on-ac', this.handleOnAc);
+        this.options.powerMonitor.on('on-battery', this.handleOnBattery);
         this.updateTrayMenu();
+        this.startSystemStatePolling();
     }
 
     getQuizInterruptionState(): QuizInterruptionState {
@@ -352,8 +447,8 @@ export class SystemIntegration {
     async registerShortcuts(map: ShortcutMap): Promise<void> {
         const entries = Object.entries(map) as Array<[ShortcutAction, string]>;
         const normalized = entries.map(([action, value]) => {
-            const accelerator = normalizeAccelerator(value);
-            if (!isValidHotkey(value))
+            const accelerator = normalizeHotkey(value);
+            if (accelerator === undefined)
                 throw new Error(`Invalid ${action} shortcut.`);
             return [action, accelerator] as const;
         });
@@ -387,6 +482,17 @@ export class SystemIntegration {
         }
     }
 
+    applySettings(
+        preferences: SettingsPreferences,
+        persist: (preferences: SettingsPreferences) => Promise<SettingsState>
+    ): Promise<SettingsState> {
+        const operation = this.settingsTransaction.then(
+            () => this.applySettingsNow(preferences, persist)
+        );
+        this.settingsTransaction = operation.catch(() => undefined);
+        return operation;
+    }
+
     togglePaused(): boolean {
         this.paused = !this.paused;
         this.options.onPausedChange(this.paused);
@@ -398,40 +504,52 @@ export class SystemIntegration {
     async refreshSystemState(): Promise<void> {
         if (this.disposed)
             return;
-        this.pendingRead?.abort();
+        for (const pendingRead of this.pendingReads)
+            pendingRead.controller.abort();
         const controller = new AbortController();
-        this.pendingRead = controller;
+        let readPromise: Promise<{ fullscreen: boolean }>;
+        try {
+            readPromise = this.options.fullscreenProbe.read(controller.signal);
+        } catch (error) {
+            readPromise = Promise.reject(error);
+        }
+        const pendingRead: PendingSystemRead = {
+            controller,
+            promise: readPromise
+        };
+        this.pendingReads.add(pendingRead);
         this.battery = this.options.powerMonitor.isOnBatteryPower();
         const idleState = this.options.powerMonitor.getSystemIdleState(
             this.options.idleThresholdSeconds ?? 60
         );
         this.idle = idleState === 'idle' || idleState === 'locked';
         try {
-            const state = await this.options.fullscreenProbe.read(controller.signal);
+            const state = await readPromise;
             if (controller.signal.aborted || this.disposed)
                 return;
             this.fullscreen = state.fullscreen;
+            this.setPresentationActive(state.fullscreen);
         } catch {
             if (controller.signal.aborted || this.disposed)
                 return;
+            this.fullscreen = true;
+            this.setPresentationActive(true);
         } finally {
-            if (this.pendingRead === controller)
-                this.pendingRead = undefined;
+            this.pendingReads.delete(pendingRead);
         }
-        this.emitPerformanceChange();
     }
 
     getPerformanceMode(): PerformanceMode {
         const context: PerformanceContext = {
             paused: this.paused
                 || this.suspended
-                || this.presentationActive
+                || (this.presentationActive && !this.fullscreen)
                 || this.suppressionPolicy.reduceMotion,
             hidden: this.hidden,
             obscured: this.obscured,
             battery: this.battery,
             idle: this.idle,
-            fullscreen: this.fullscreen,
+            fullscreen: this.fullscreen || this.presentationActive,
             suppressed: this.activeTranslation
         };
         const mode = resolvePerformanceMode(context);
@@ -449,29 +567,123 @@ export class SystemIntegration {
         return this.canStartQuiz();
     }
 
-    dispose(): void {
-        if (this.disposed)
-            return;
+    dispose(): Promise<void> {
+        if (this.disposePromise !== undefined)
+            return this.disposePromise;
         this.disposed = true;
-        this.pendingRead?.abort();
-        this.pendingRead = undefined;
-        this.unregisterShortcuts();
-        this.options.powerMonitor.removeListener('suspend', this.handleSuspend);
-        this.options.powerMonitor.removeListener('resume', this.handleResume);
-        this.options.tray.destroy();
+        this.stopSystemStatePolling();
+        const pendingReads = [...this.pendingReads];
+        for (const pendingRead of pendingReads)
+            pendingRead.controller.abort();
+        this.disposePromise = (async () => {
+            await Promise.allSettled(pendingReads.map((pendingRead) => pendingRead.promise));
+            this.unregisterShortcuts();
+            this.options.powerMonitor.removeListener('suspend', this.handleSuspend);
+            this.options.powerMonitor.removeListener('resume', this.handleResume);
+            this.options.powerMonitor.removeListener('on-ac', this.handleOnAc);
+            this.options.powerMonitor.removeListener('on-battery', this.handleOnBattery);
+            this.options.tray.destroy();
+        })();
+        return this.disposePromise;
     }
 
     private readonly handleSuspend = (): void => {
         this.suspended = true;
-        this.pendingRead?.abort();
-        this.pendingRead = undefined;
+        this.stopSystemStatePolling();
+        for (const pendingRead of this.pendingReads)
+            pendingRead.controller.abort();
         this.emitPerformanceChange();
     };
 
     private readonly handleResume = (): void => {
         this.suspended = false;
+        this.startSystemStatePolling();
         void this.refreshSystemState();
     };
+
+    private readonly handleOnAc = (): void => {
+        this.setBatteryState(false);
+    };
+
+    private readonly handleOnBattery = (): void => {
+        this.setBatteryState(true);
+    };
+
+    private setBatteryState(battery: boolean): void {
+        if (this.disposed || this.battery === battery)
+            return;
+        this.battery = battery;
+        this.emitPerformanceChange();
+    }
+
+    private startSystemStatePolling(): void {
+        if (
+            this.disposed
+            || this.suspended
+            || this.systemStateTimer !== undefined
+        )
+            return;
+        const interval = this.options.systemStatePollIntervalMs ?? 30_000;
+        if (interval <= 0)
+            return;
+        this.systemStateTimer = setInterval(() => {
+            void this.refreshSystemState();
+        }, interval);
+    }
+
+    private stopSystemStatePolling(): void {
+        if (this.systemStateTimer === undefined)
+            return;
+        clearInterval(this.systemStateTimer);
+        this.systemStateTimer = undefined;
+    }
+
+    private async applySettingsNow(
+        preferences: SettingsPreferences,
+        persist: (preferences: SettingsPreferences) => Promise<SettingsState>
+    ): Promise<SettingsState> {
+        const previousShortcuts = [...this.registeredShortcuts];
+        const previousPolicy = { ...this.suppressionPolicy };
+        try {
+            await this.registerShortcuts({
+                selection: preferences.hotkey,
+                screenshot: preferences.screenshotHotkey
+            });
+            await this.setSuppressionPolicy(preferences.performance);
+            return await persist(preferences);
+        } catch (error) {
+            const rollbackErrors: unknown[] = [];
+            try {
+                await this.setSuppressionPolicy(previousPolicy);
+                this.restoreShortcutEntries(previousShortcuts);
+            } catch (rollbackError) {
+                rollbackErrors.push(rollbackError);
+            }
+            if (rollbackErrors.length > 0) {
+                throw new AggregateError(
+                    [error, ...rollbackErrors],
+                    'Settings application failed and rollback was incomplete.',
+                    { cause: error }
+                );
+            }
+            throw error;
+        }
+    }
+
+    private restoreShortcutEntries(
+        entries: Array<[ShortcutAction, string]>
+    ): void {
+        this.unregisterShortcuts();
+        for (const [action, accelerator] of entries) {
+            if (this.options.shortcutRegistrar.register(
+                accelerator,
+                this.getShortcutListener(action)
+            ))
+                this.registeredShortcuts.set(action, accelerator);
+            else
+                throw new Error(`Unable to restore shortcut ${accelerator}.`);
+        }
+    }
 
     private unregisterShortcuts(): void {
         for (const accelerator of this.registeredShortcuts.values())

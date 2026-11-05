@@ -22,18 +22,118 @@ function isHttpsUrl(value: string): boolean {
     }
 }
 
+const hotkeyModifierAliases: Readonly<Record<string, string>> = {
+    alt: 'Alt',
+    option: 'Alt',
+    commandorcontrol: 'Control',
+    cmdorctrl: 'Control',
+    control: 'Control',
+    ctrl: 'Control',
+    ctl: 'Control',
+    meta: 'Super',
+    os: 'Super',
+    super: 'Super',
+    win: 'Super',
+    cmd: 'Super',
+    command: 'Super',
+    shift: 'Shift'
+};
+
+const hotkeyModifierOrder = ['Control', 'Alt', 'Shift', 'Super'] as const;
+const hotkeyKeyAliases: Readonly<Record<string, string>> = {
+    backspace: 'Backspace',
+    capslock: 'CapsLock',
+    del: 'Delete',
+    delete: 'Delete',
+    down: 'Down',
+    downarrow: 'Down',
+    end: 'End',
+    enter: 'Return',
+    esc: 'Escape',
+    escape: 'Escape',
+    home: 'Home',
+    ins: 'Insert',
+    insert: 'Insert',
+    left: 'Left',
+    leftarrow: 'Left',
+    mediaplaypause: 'MediaPlayPause',
+    medianexttrack: 'MediaNextTrack',
+    mediaprevioustrack: 'MediaPreviousTrack',
+    mediastop: 'MediaStop',
+    numlock: 'NumLock',
+    numpadadd: 'NumpadAdd',
+    numpadcomma: 'NumpadComma',
+    numpaddecimal: 'NumpadDecimal',
+    numpaddivide: 'NumpadDivide',
+    numpadenter: 'NumpadEnter',
+    numpadequal: 'NumpadEqual',
+    numpadmultiply: 'NumpadMultiply',
+    numpadsubtract: 'NumpadSubtract',
+    pagedown: 'PageDown',
+    pgdn: 'PageDown',
+    pageup: 'PageUp',
+    pgup: 'PageUp',
+    plus: 'Plus',
+    printscreen: 'PrintScreen',
+    printscrn: 'PrintScreen',
+    return: 'Return',
+    right: 'Right',
+    rightarrow: 'Right',
+    scrolllock: 'ScrollLock',
+    space: 'Space',
+    spacebar: 'Space',
+    tab: 'Tab',
+    up: 'Up',
+    uparrow: 'Up',
+    volumedown: 'VolumeDown',
+    volumemute: 'VolumeMute',
+    volumeup: 'VolumeUp'
+};
+
+const hotkeyPunctuationKeys = new Set([
+    '-', '=', '[', ']', ';', "'", ',', '.', '/', '`', '\\'
+]);
+
+function normalizeHotkeyKey(value: string): string | undefined {
+    const lower = value.toLowerCase();
+    const alias = hotkeyKeyAliases[lower];
+    if (alias !== undefined)
+        return alias;
+    if (/^[a-z]$/u.test(lower))
+        return lower.toUpperCase();
+    if (/^\d$/u.test(lower))
+        return lower;
+    const functionKey = /^f([1-9]|1[0-9]|2[0-4])$/u.exec(lower);
+    if (functionKey !== null)
+        return `F${functionKey[1]}`;
+    if (/^numpad[0-9]$/u.test(lower))
+        return `Numpad${lower.slice(-1)}`;
+    return hotkeyPunctuationKeys.has(value) ? value : undefined;
+}
+
+export function normalizeHotkey(value: string): string | undefined {
+    const parts = value.split('+').map((part) => part.trim());
+    if (parts.length < 2 || parts.some((part) => part.length === 0))
+        return undefined;
+    const modifiers = parts.slice(0, -1).map((part) => {
+        return hotkeyModifierAliases[part.toLowerCase()];
+    });
+    if (modifiers.some((modifier) => modifier === undefined))
+        return undefined;
+    if (new Set(modifiers).size !== modifiers.length)
+        return undefined;
+    const key = normalizeHotkeyKey(parts.at(-1) ?? '');
+    if (key === undefined)
+        return undefined;
+    const modifierSet = new Set(modifiers);
+    return [
+        ...hotkeyModifierOrder.filter((modifier) => modifierSet.has(modifier)),
+        key
+    ].join('+');
+}
+
 export function isValidHotkey(value: string): boolean {
-    const parts = value.split('+').map((part) => part.trim()).filter(Boolean);
-    if (parts.length < 2)
-        return false;
-    const modifiers = parts.slice(0, -1);
-    const key = parts.at(-1);
-    const allowedModifiers = ['Alt', 'Control', 'Ctrl', 'Meta', 'Shift'];
-    const modifierAliases = ['Alt', 'Control', 'Meta', 'OS', 'Shift'];
-    return key !== undefined
-        && !modifierAliases.includes(key)
-        && modifiers.every((modifier) => allowedModifiers.includes(modifier))
-        && new Set(modifiers).size === modifiers.length;
+    return normalizeHotkey(value) !== undefined;
 }
 
 export function detectSourceLanguage(value: string): string {
@@ -513,10 +613,10 @@ export const quizIpcChannels = {
 
 export const settingsPreferencesSchema = z.strictObject({
     hotkey: z.string().min(1).max(64).refine(isValidHotkey, {
-        message: 'Use one or more modifiers plus exactly one key.'
+        message: 'Use one or more modifiers plus exactly one known key.'
     }),
     screenshotHotkey: z.string().min(1).max(64).refine(isValidHotkey, {
-        message: 'Use one or more modifiers plus exactly one key.'
+        message: 'Use one or more modifiers plus exactly one known key.'
     }).default('Ctrl+Shift+S'),
     privacy: z.strictObject({
         localOnly: z.boolean(),
@@ -528,6 +628,12 @@ export const settingsPreferencesSchema = z.strictObject({
         pauseWhenFullscreen: z.boolean(),
         limitFrameRate: z.boolean()
     })
+}).refine((preferences) => {
+    return normalizeHotkey(preferences.hotkey)
+        !== normalizeHotkey(preferences.screenshotHotkey);
+}, {
+    message: 'Global shortcut keys must be unique.',
+    path: ['screenshotHotkey']
 });
 
 export const settingsStateSchema = z.strictObject({

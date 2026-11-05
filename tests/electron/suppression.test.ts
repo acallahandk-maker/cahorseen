@@ -28,18 +28,21 @@ interface SystemIntegrationApi {
     getQuizSuppressionReason(): 'fullscreen' | 'activeTranslation' | 'intenseInput' | undefined;
     canStartQuiz(): boolean;
     canAnswerQuiz(): boolean;
-    dispose(): void;
+    dispose(): Promise<void>;
 }
 
-function createIntegration(): {
+function createIntegration(options: { systemStatePollIntervalMs?: number } = {}): {
     integration: SystemIntegrationApi;
     powerMonitor: {
         onBattery: boolean;
         idleState: 'active' | 'idle' | 'locked' | 'unknown';
         batteryReads: number;
         idleReads: number;
-        listeners: Map<'suspend' | 'resume', Set<() => void>>;
-        emit(event: 'suspend' | 'resume'): void;
+        listeners: Map<
+            'suspend' | 'resume' | 'on-ac' | 'on-battery',
+            Set<() => void>
+        >;
+        emit(event: 'suspend' | 'resume' | 'on-ac' | 'on-battery'): void;
     };
     probe: {
         calls: number;
@@ -54,7 +57,10 @@ function createIntegration(): {
         idleState: 'active' as 'active' | 'idle' | 'locked' | 'unknown',
         batteryReads: 0,
         idleReads: 0,
-        listeners: new Map<'suspend' | 'resume', Set<() => void>>(),
+        listeners: new Map<
+            'suspend' | 'resume' | 'on-ac' | 'on-battery',
+            Set<() => void>
+        >(),
         isOnBatteryPower() {
             ++this.batteryReads;
             return this.onBattery;
@@ -63,17 +69,23 @@ function createIntegration(): {
             ++this.idleReads;
             return this.idleState;
         },
-        on(event: 'suspend' | 'resume', listener: () => void) {
+        on(
+            event: 'suspend' | 'resume' | 'on-ac' | 'on-battery',
+            listener: () => void
+        ) {
             const listeners = this.listeners.get(event) ?? new Set<() => void>();
             listeners.add(listener);
             this.listeners.set(event, listeners);
             return this;
         },
-        removeListener(event: 'suspend' | 'resume', listener: () => void) {
+        removeListener(
+            event: 'suspend' | 'resume' | 'on-ac' | 'on-battery',
+            listener: () => void
+        ) {
             this.listeners.get(event)?.delete(listener);
             return this;
         },
-        emit(event: 'suspend' | 'resume') {
+        emit(event: 'suspend' | 'resume' | 'on-ac' | 'on-battery') {
             for (const listener of this.listeners.get(event) ?? [])
                 listener();
         }
@@ -111,7 +123,8 @@ function createIntegration(): {
             onShow: vi.fn(),
             onOpenSettings: vi.fn(),
             onPausedChange: vi.fn(),
-            onExit: vi.fn()
+            onExit: vi.fn(),
+            ...options
         }),
         powerMonitor,
         probe
@@ -191,6 +204,51 @@ describe('performance suppression', () => {
         expect(harness.integration.canAnswerQuiz()).toBe(false);
     });
 
+    it('derives presentation suppression from production fullscreen probes', async () => {
+        const harness = createIntegration();
+        await harness.integration.setSuppressionPolicy({
+            reduceMotion: false,
+            pauseWhenFullscreen: false,
+            limitFrameRate: true
+        });
+        harness.probe.fullscreen = true;
+
+        await harness.integration.refreshSystemState();
+
+        expect(harness.integration.getQuizSuppressionReason()).toBe('intenseInput');
+    });
+
+    it('does not infer obscured state from ordinary window blur', async () => {
+        const systemModule = await import('../../src/main/systemIntegration') as unknown as
+            Record<string, unknown>;
+        expect(systemModule.configurePerformanceWindowEvents).toBeTypeOf('function');
+        const listeners = new Map<string, () => void>();
+        const setObscured = vi.fn();
+        const configure = systemModule.configurePerformanceWindowEvents as (
+            windowEvents: {
+                on(event: string, listener: () => void): unknown;
+            },
+            state: {
+                setFullscreen(fullscreen: boolean): void;
+                setHidden(hidden: boolean): void;
+                setObscured(obscured: boolean): void;
+            }
+        ) => void;
+        configure({
+            on(event, listener) {
+                listeners.set(event, listener);
+            }
+        }, {
+            setFullscreen: vi.fn(),
+            setHidden: vi.fn(),
+            setObscured
+        });
+
+        listeners.get('blur')?.();
+        listeners.get('focus')?.();
+        expect(setObscured).not.toHaveBeenCalled();
+    });
+
     it('reduces hidden idle obscured and battery rendering to the required frame rates', async () => {
         const harness = createIntegration();
         harness.integration.setHidden(true);
@@ -253,6 +311,51 @@ describe('system reads and power lifecycle', () => {
         expect(harness.powerMonitor.batteryReads).toBe(2);
         expect(harness.powerMonitor.idleReads).toBe(2);
     });
+
+    it('applies battery and AC transitions from powerMonitor events', async () => {
+        const harness = createIntegration();
+
+        harness.powerMonitor.emit('on-battery');
+        expect(harness.integration.getPerformanceMode()).toMatchObject({
+            reason: 'battery',
+            frameRate: 10
+        });
+        harness.powerMonitor.emit('on-ac');
+        expect(harness.integration.getPerformanceMode()).toMatchObject({
+            reason: 'normal',
+            frameRate: 30
+        });
+    });
+
+    it('polls bounded one-shot state so idle and external fullscreen changes apply', async () => {
+        vi.useFakeTimers();
+        try {
+            const harness = createIntegration({
+                systemStatePollIntervalMs: 25
+            });
+            harness.powerMonitor.idleState = 'idle';
+
+            await vi.advanceTimersByTimeAsync(25);
+
+            expect(harness.powerMonitor.idleReads).toBeGreaterThan(0);
+            expect(harness.probe.calls).toBeGreaterThan(0);
+            expect(harness.integration.getPerformanceMode()).toMatchObject({
+                reason: 'idle',
+                frameRate: 10
+            });
+
+            harness.powerMonitor.idleState = 'active';
+            harness.probe.fullscreen = true;
+            await vi.advanceTimersByTimeAsync(25);
+
+            expect(harness.integration.getPerformanceMode()).toMatchObject({
+                reason: 'fullscreen',
+                frameRate: 0
+            });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });
 
 describe('Windows fullscreen detection', () => {
@@ -288,6 +391,11 @@ describe('Windows fullscreen detection', () => {
 
     it('performs one short-lived native foreground-window read per probe', async () => {
         const calls: Array<{ file: string; signal: AbortSignal }> = [];
+        const child = {
+            killed: false,
+            kill: vi.fn(() => true),
+            once: vi.fn()
+        };
         const probe = createWindowsFullscreenProbe({
             platform: 'linux',
             execFile: (file, _args, options, callback) => {
@@ -307,6 +415,7 @@ describe('Windows fullscreen detection', () => {
                     },
                     hasCaption: false
                 }));
+                return child as never;
             }
         });
         const controller = new AbortController();
@@ -317,5 +426,89 @@ describe('Windows fullscreen detection', () => {
         expect(calls).toHaveLength(1);
         expect(calls[0].file).toBe('powershell.exe');
         expect(calls[0].signal).toBe(controller.signal);
+    });
+
+    it('kills and joins a spawned fullscreen probe during disposal', async () => {
+        let exitListener: (() => void) | undefined;
+        let killRequested = false;
+        let exited = false;
+        let callback: ((error: Error | null, stdout: string) => void) | undefined;
+        const Integration = SystemIntegration as unknown as new (options: unknown) => SystemIntegrationApi;
+        const integration = new Integration({
+            shortcutRegistrar: {
+                register: () => true,
+                unregister: () => undefined
+            },
+            tray: {
+                setContextMenu: () => undefined,
+                destroy: () => undefined
+            },
+            buildMenu: (template: unknown) => template,
+            powerMonitor: {
+                isOnBatteryPower: () => false,
+                getSystemIdleState: () => 'active',
+                on: () => undefined,
+                removeListener: () => undefined
+            },
+            fullscreenProbe: createWindowsFullscreenProbe({
+                platform: 'linux',
+                execFile: (_file, _args, options, callbackArg) => {
+                    callback = callbackArg;
+                    const child = {
+                        kill: () => {
+                            killRequested = true;
+                            exitListener?.();
+                            return true;
+                        },
+                        once: (event: string, listener: () => void) => {
+                            if (event === 'exit')
+                                exitListener = () => {
+                                    exited = true;
+                                    listener();
+                                };
+                            return child;
+                        }
+                    };
+                    options.signal.addEventListener('abort', () => {
+                        setTimeout(() => {
+                            if (!killRequested) {
+                                exited = true;
+                                callback?.(new Error('aborted'), '');
+                            }
+                        }, 0);
+                    }, { once: true });
+                    return child as never;
+                }
+            }),
+            onSelectionShortcut: () => undefined,
+            onScreenshotShortcut: () => undefined,
+            onShow: () => undefined,
+            onOpenSettings: () => undefined,
+            onPausedChange: () => undefined,
+            onExit: () => undefined
+        });
+        const refresh = integration.refreshSystemState();
+
+        const disposal = integration.dispose();
+        await disposal;
+        await refresh;
+
+        expect(killRequested).toBe(true);
+        expect(exited).toBe(true);
+    });
+
+    it('falls back to suppression when the fullscreen probe fails', async () => {
+        const harness = createIntegration();
+        harness.probe.read = async () => {
+            throw new Error('Fullscreen probe failed.');
+        };
+
+        await harness.integration.refreshSystemState();
+
+        expect(harness.integration.getPerformanceMode()).toEqual({
+            reason: 'fullscreen',
+            frameRate: 0,
+            suppressed: true
+        });
     });
 });

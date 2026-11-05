@@ -60,6 +60,7 @@ import {
 } from './services/memoryDatabase';
 import { QuizScheduler } from './services/quizScheduler';
 import {
+    configurePerformanceWindowEvents,
     createWindowsFullscreenProbe,
     SystemIntegration,
     type TrayLike
@@ -263,12 +264,25 @@ app.whenReady().then(async () => {
         }
     });
     const configurePetWindow = (window: BrowserWindow): void => {
-        window.on('enter-full-screen', () => systemIntegration.setFullscreen(true));
-        window.on('leave-full-screen', () => systemIntegration.setFullscreen(false));
-        window.on('hide', () => systemIntegration.setHidden(true));
-        window.on('show', () => systemIntegration.setHidden(false));
-        window.on('blur', () => systemIntegration.setObscured(true));
-        window.on('focus', () => systemIntegration.setObscured(false));
+        configurePerformanceWindowEvents({
+            on: (event, listener) => {
+                switch (event) {
+                    case 'enter-full-screen':
+                        window.on('enter-full-screen', listener);
+                        break;
+                    case 'leave-full-screen':
+                        window.on('leave-full-screen', listener);
+                        break;
+                    case 'hide':
+                        window.on('hide', listener);
+                        break;
+                    case 'show':
+                        window.on('show', listener);
+                        break;
+                }
+                return window;
+            }
+        }, systemIntegration);
     };
     configurePetWindow(petWindow);
     const quizScheduler = new QuizScheduler({
@@ -290,14 +304,10 @@ app.whenReady().then(async () => {
             getActiveProviderConfig,
             getProviderDetails,
             saveProvider,
-            saveSettings: async (preferences) => {
-                await systemIntegration.registerShortcuts({
-                    selection: preferences.hotkey,
-                    screenshot: preferences.screenshotHotkey
-                });
-                await systemIntegration.setSuppressionPolicy(preferences.performance);
-                return saveSettings(preferences);
-            },
+            saveSettings: (preferences) => systemIntegration.applySettings(
+                preferences,
+                saveSettings
+            ),
             setActiveProvider,
             getProviderSummaries,
             testProvider
@@ -347,19 +357,22 @@ app.whenReady().then(async () => {
     void systemIntegration.refreshSystemState();
 
     let shutdownComplete = false;
+    let shutdownStarted = false;
     app.on('before-quit', (event) => {
         if (shutdownComplete)
             return;
         event.preventDefault();
-        systemIntegration.dispose();
-        disposeIpcRouter();
-        screenshotOverlay.dispose();
-        void closeDefaultMemoryDatabase()
-            .catch(() => undefined)
-            .finally(() => {
-                shutdownComplete = true;
-                app.quit();
-            });
+        if (shutdownStarted)
+            return;
+        shutdownStarted = true;
+        void (async () => {
+            await systemIntegration.dispose().catch(() => undefined);
+            disposeIpcRouter();
+            screenshotOverlay.dispose();
+            await closeDefaultMemoryDatabase().catch(() => undefined);
+            shutdownComplete = true;
+            app.quit();
+        })();
     });
 
     app.on('activate', () => {

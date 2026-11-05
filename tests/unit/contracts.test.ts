@@ -4,6 +4,7 @@ import {
     capturedImageSchema,
     connectionTestResultSchema,
     heatStatisticSchema,
+    isValidHotkey,
     memoryEntrySchema,
     performanceModeSchema,
     providerConfigSchema,
@@ -20,6 +21,14 @@ import {
 } from '../../src/shared/contracts';
 
 describe('shared contracts', () => {
+    it('rejects unknown keys and modifier aliases that collapse to duplicates', () => {
+        expect(isValidHotkey('Ctrl+NotAKey')).toBe(false);
+        expect(isValidHotkey('Ctrl+Control+S')).toBe(false);
+        expect(isValidHotkey('Ctrl++S')).toBe(false);
+        expect(isValidHotkey('Ctrl+F12')).toBe(true);
+        expect(isValidHotkey('Ctrl+Escape')).toBe(true);
+    });
+
     it('rejects provider summaries with missing, unknown, or mistyped fields', () => {
         const valid = {
             id: 'mimo',
