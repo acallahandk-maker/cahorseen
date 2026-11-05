@@ -295,6 +295,7 @@ export function VocabularyHeatView({
     const mountedRef = useRef(true);
     const requestGeneration = useRef(0);
     const memoryStateGeneration = useRef(0);
+    const pauseMutationInFlightRef = useRef(false);
     const dialogGeneration = useRef(0);
     const searchInteractedRef = useRef(false);
     const actionsRef = useRef(actions);
@@ -371,6 +372,7 @@ export function VocabularyHeatView({
         if (repository === undefined)
             return;
         const memoryStateVersion = memoryStateGeneration.current;
+        const memoryStateStartedDuringPauseMutation = pauseMutationInFlightRef.current;
         const from = rangeFrom(filter.range, stableNowMs);
         const common = {
             ...(filter.sourceLanguage.length === 0
@@ -381,26 +383,40 @@ export function VocabularyHeatView({
                 : { targetLanguage: filter.targetLanguage }),
             ...(from === undefined ? {} : { from })
         };
+        const memoryStateRequest = Promise.resolve()
+            .then(() => repository.getMemoryEnabled())
+            .then((memoryEnabled) => {
+                if (!memoryStateStartedDuringPauseMutation
+                    && !pauseMutationInFlightRef.current
+                    && memoryStateVersion === memoryStateGeneration.current)
+                    setMemoryPaused(!memoryEnabled);
+            })
+            .catch((error: unknown) => {
+                if (mountedRef.current
+                    && generation === requestGeneration.current
+                    && !memoryStateStartedDuringPauseMutation
+                    && !pauseMutationInFlightRef.current
+                    && memoryStateVersion === memoryStateGeneration.current)
+                    setActionError(errorMessage(error, 'Vocabulary data could not be loaded.'));
+            });
         try {
-            const [nextStatistics, nextEntries, memoryEnabled] = await Promise.all([
+            const [nextStatistics, nextEntries] = await Promise.all([
                 repository.queryHeat(common),
                 repository.listEntries({
                     ...common,
                     ...(query.length === 0 ? {} : { search: query }),
                     limit: 10_000
-                }),
-                repository.getMemoryEnabled()
+                })
             ]);
             if (!mountedRef.current || generation !== requestGeneration.current)
                 return;
             setRepositoryStatistics(nextStatistics);
             setRepositoryEntries(nextEntries);
-            if (memoryStateVersion === memoryStateGeneration.current)
-                setMemoryPaused(!memoryEnabled);
         } catch (error) {
             if (mountedRef.current && generation === requestGeneration.current)
                 setActionError(errorMessage(error, 'Vocabulary data could not be loaded.'));
         }
+        await memoryStateRequest;
     }, [filter.range, filter.sourceLanguage, filter.targetLanguage, repository, stableNowMs]);
 
     const runActionSafely = (
@@ -565,27 +581,38 @@ export function VocabularyHeatView({
     };
 
     const toggleMemory = async (paused: boolean): Promise<void> => {
-        if (pendingAction !== undefined)
+        if (pauseMutationInFlightRef.current || pendingAction !== undefined)
             return;
         const previous = memoryPaused;
-        memoryStateGeneration.current += 1;
-        setMemoryPaused(paused);
-        setPendingAction('pause');
-        setActionError(undefined);
+        let finalMemoryPaused: boolean | undefined = paused;
+        let finalActionError: string | undefined;
+        pauseMutationInFlightRef.current = true;
         try {
-            if (repository !== undefined)
-                await repository.setMemoryEnabled(!paused);
-            else
-                await actionsRef.current?.toggleMemory?.(paused);
-        } catch (error) {
-            if (mountedRef.current) {
-                setMemoryPaused(previous);
-                setActionError(errorMessage(error, 'Vocabulary memory setting failed.'));
+            memoryStateGeneration.current += 1;
+            setMemoryPaused(paused);
+            setPendingAction('pause');
+            setActionError(undefined);
+            try {
+                if (repository !== undefined)
+                    await repository.setMemoryEnabled(!paused);
+                else
+                    await actionsRef.current?.toggleMemory?.(paused);
+            } catch (error) {
+                finalMemoryPaused = previous;
+                finalActionError = errorMessage(error, 'Vocabulary memory setting failed.');
             }
         } finally {
             memoryStateGeneration.current += 1;
-            if (mountedRef.current)
-                setPendingAction(undefined);
+            try {
+                if (mountedRef.current) {
+                    setMemoryPaused(finalMemoryPaused);
+                    if (finalActionError !== undefined)
+                        setActionError(finalActionError);
+                    setPendingAction(undefined);
+                }
+            } finally {
+                pauseMutationInFlightRef.current = false;
+            }
         }
     };
 

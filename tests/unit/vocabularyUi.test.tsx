@@ -131,12 +131,18 @@ function repositoryFixture(overrides: Partial<VocabularyRepositoryFacade> = {}):
     };
 }
 
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (reason?: unknown) => void;
+} {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>((settle) => {
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((settle, fail) => {
         resolve = settle;
+        reject = fail;
     });
-    return { promise, resolve };
+    return { promise, resolve, reject };
 }
 
 afterEach(() => {
@@ -544,6 +550,125 @@ describe('VocabularyHeatView', () => {
         expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', false);
         expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
             .toContain('Vocabulary memory active');
+    });
+
+    it('discards memory state that settles during a pending successful pause mutation', async () => {
+        const user = userEvent.setup();
+        const staleMemoryState = deferred<boolean>();
+        const pendingMutation = deferred<void>();
+        const updatedEntries = [makeEntry({
+            id: 'entry-delta',
+            sourceText: 'Delta source',
+            normalizedSource: 'delta source',
+            translatedText: 'Delta translation'
+        })];
+        const getMemoryEnabled = vi.fn()
+            .mockResolvedValueOnce(true)
+            .mockImplementationOnce(() => staleMemoryState.promise);
+        const setMemoryEnabled = vi.fn(() => pendingMutation.promise);
+        render(
+            <VocabularyHeatView
+                statistics={statisticsFixture()}
+                entries={entriesFixture()}
+                now={now}
+                repository={repositoryFixture({
+                    getMemoryEnabled,
+                    setMemoryEnabled,
+                    listEntries: vi.fn()
+                        .mockResolvedValueOnce(entriesFixture())
+                        .mockResolvedValueOnce(updatedEntries)
+                })}
+            />
+        );
+
+        await screen.findByRole('button', { name: 'Delete Alpha source' });
+        await user.click(screen.getByLabelText('Pause vocabulary memory'));
+        expect(setMemoryEnabled).toHaveBeenCalledWith(false);
+        expect(setMemoryEnabled).toHaveBeenCalledTimes(1);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
+
+        await user.click(screen.getByRole('button', { name: '7 days' }));
+        await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(2));
+        await user.click(screen.getByLabelText('Pause vocabulary memory'));
+        expect(setMemoryEnabled).toHaveBeenCalledTimes(1);
+        await screen.findByText('Delta source');
+        expect(screen.queryByText('Beta source')).toBeNull();
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
+        staleMemoryState.resolve(true);
+        await staleMemoryState.promise;
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory paused');
+
+        pendingMutation.resolve();
+        await pendingMutation.promise;
+        await waitFor(() => expect(
+            screen.getByLabelText('Pause vocabulary memory')
+        ).toHaveProperty('disabled', false));
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory paused');
+    });
+
+    it('keeps rollback when memory state settles during a pending failed pause mutation', async () => {
+        const user = userEvent.setup();
+        const staleMemoryState = deferred<boolean>();
+        const pendingMutation = deferred<void>();
+        const updatedEntries = [makeEntry({
+            id: 'entry-delta',
+            sourceText: 'Delta source',
+            normalizedSource: 'delta source',
+            translatedText: 'Delta translation'
+        })];
+        const getMemoryEnabled = vi.fn()
+            .mockResolvedValueOnce(true)
+            .mockImplementationOnce(() => staleMemoryState.promise);
+        const setMemoryEnabled = vi.fn(() => pendingMutation.promise);
+        render(
+            <VocabularyHeatView
+                statistics={statisticsFixture()}
+                entries={entriesFixture()}
+                now={now}
+                repository={repositoryFixture({
+                    getMemoryEnabled,
+                    setMemoryEnabled,
+                    listEntries: vi.fn()
+                        .mockResolvedValueOnce(entriesFixture())
+                        .mockResolvedValueOnce(updatedEntries)
+                })}
+            />
+        );
+
+        await screen.findByRole('button', { name: 'Delete Alpha source' });
+        await user.click(screen.getByLabelText('Pause vocabulary memory'));
+        expect(setMemoryEnabled).toHaveBeenCalledWith(false);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
+
+        await user.click(screen.getByRole('button', { name: '7 days' }));
+        await waitFor(() => expect(getMemoryEnabled).toHaveBeenCalledTimes(2));
+        await screen.findByText('Delta source');
+        expect(screen.queryByText('Beta source')).toBeNull();
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
+        staleMemoryState.resolve(true);
+        await staleMemoryState.promise;
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', true);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', true);
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory paused');
+
+        pendingMutation.reject(new Error('Pause failed.'));
+        await pendingMutation.promise.catch(() => undefined);
+        await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Pause failed.'));
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('checked', false);
+        expect(screen.getByLabelText('Pause vocabulary memory')).toHaveProperty('disabled', false);
+        expect(screen.getByRole('status', { name: 'Vocabulary memory status' }).textContent)
+            .toContain('Vocabulary memory active');
+        expect(screen.getByRole('alert').textContent).toContain('Pause failed.');
     });
 
     it('discards stale memory state after unmount', async () => {
