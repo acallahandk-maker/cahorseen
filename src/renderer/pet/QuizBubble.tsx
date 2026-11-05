@@ -47,15 +47,19 @@ export default function QuizBubble({
     const [feedback, setFeedback] = useState<QuizFeedback>();
     const [feedbackLabel, setFeedbackLabel] = useState('Correct');
     const [submissionError, setSubmissionError] = useState<string>();
+    const [terminalSubmission, setTerminalSubmission] = useState(false);
     const [busy, setBusy] = useState(false);
     const submissionInFlightRef = useRef(false);
     const terminalSubmissionRef = useRef(false);
-    const terminal = feedback !== undefined || submissionError !== undefined;
+    const terminal = terminalSubmission
+        || feedback !== undefined
+        || submissionError !== undefined;
 
     useEffect(() => {
         setFeedback(undefined);
         setFeedbackLabel('Correct');
         setSubmissionError(undefined);
+        setTerminalSubmission(false);
         submissionInFlightRef.current = false;
         terminalSubmissionRef.current = false;
     }, [question]);
@@ -65,6 +69,7 @@ export default function QuizBubble({
             return;
         submissionInFlightRef.current = true;
         terminalSubmissionRef.current = true;
+        setTerminalSubmission(true);
         setBusy(true);
         setSubmissionError(undefined);
         try {
@@ -87,6 +92,7 @@ export default function QuizBubble({
             return;
         submissionInFlightRef.current = true;
         terminalSubmissionRef.current = true;
+        setTerminalSubmission(true);
         setBusy(true);
         setSubmissionError(undefined);
         try {
@@ -105,7 +111,6 @@ export default function QuizBubble({
         if (busy || submissionInFlightRef.current)
             return;
         setBusy(true);
-        setSubmissionError(undefined);
         try {
             await onPauseChange(!paused);
             onMascotEvent?.(quizOutcomeToMascotEvent('paused'));

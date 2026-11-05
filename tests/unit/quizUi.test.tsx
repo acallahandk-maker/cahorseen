@@ -7,7 +7,7 @@ import {
     waitFor
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../../src/renderer/App';
 import QuizBubble, {
@@ -64,6 +64,30 @@ function installDesktopPetApi(
         value: api
     });
     return api as unknown as Window['desktopPet'];
+}
+
+function PauseAwareQuiz({
+    onAnswer,
+    onSkip,
+    onPauseChange
+}: {
+    onAnswer: (optionIndex: number) => Promise<QuizFeedback>;
+    onSkip: () => Promise<QuizFeedback>;
+    onPauseChange: (paused: boolean) => Promise<void>;
+}): React.JSX.Element {
+    const [paused, setPaused] = useState(false);
+    return (
+        <QuizBubble
+            question={question}
+            paused={paused}
+            onAnswer={onAnswer}
+            onSkip={onSkip}
+            onPauseChange={async (nextPaused) => {
+                await onPauseChange(nextPaused);
+                setPaused(nextPaused);
+            }}
+        />
+    );
 }
 
 afterEach(() => {
@@ -276,4 +300,52 @@ describe('QuizBubble', () => {
 
         expect(screen.queryByRole('region', { name: 'Vocabulary quiz' })).toBeNull();
     });
+
+    it.each([
+        ['answer', /answer option 1/i],
+        ['skip', 'Skip']
+    ] as const)(
+        'keeps controls terminally disabled after pause and resume following a rejected %s',
+        async (submission, controlName) => {
+            const user = userEvent.setup();
+            const onAnswer = vi.fn(async (): Promise<QuizFeedback> => {
+                if (submission === 'answer')
+                    throw new Error('Answer submission failed.');
+                return feedback({ correct: true });
+            });
+            const onSkip = vi.fn(async (): Promise<QuizFeedback> => {
+                if (submission === 'skip')
+                    throw new Error('Skip submission failed.');
+                return feedback();
+            });
+            const onPauseChange = vi.fn(async () => undefined);
+            render(
+                <PauseAwareQuiz
+                    onAnswer={onAnswer}
+                    onSkip={onSkip}
+                    onPauseChange={onPauseChange}
+                />
+            );
+
+            await user.click(screen.getByRole('button', { name: controlName }));
+            await screen.findByRole('alert');
+            await user.click(screen.getByRole('button', { name: 'Pause quizzes' }));
+            await screen.findByRole('button', { name: 'Resume quizzes' });
+            await user.click(screen.getByRole('button', { name: 'Resume quizzes' }));
+            await screen.findByRole('button', { name: 'Pause quizzes' });
+
+            const answerControl = screen.getByRole(
+                'button',
+                { name: /answer option 2/i }
+            );
+            const skipControl = screen.getByRole('button', { name: 'Skip' });
+            expect(answerControl).toHaveProperty('disabled', true);
+            expect(skipControl).toHaveProperty('disabled', true);
+            await user.click(answerControl);
+            await user.click(skipControl);
+            expect(onAnswer).toHaveBeenCalledTimes(submission === 'answer' ? 1 : 0);
+            expect(onSkip).toHaveBeenCalledTimes(submission === 'skip' ? 1 : 0);
+            expect(onPauseChange).toHaveBeenCalledTimes(2);
+        }
+    );
 });
