@@ -309,4 +309,28 @@ describe('QuizScheduler', () => {
 
         await expect(scheduler.selectQuizQuestions(1)).resolves.toEqual([]);
     });
+
+    it('discards a question when translation suppression starts during memory loading', async () => {
+        let canStart = true;
+        let resolveEntries!: (entries: MemoryEntry[]) => void;
+        const entriesPromise = new Promise<MemoryEntry[]>((resolve) => {
+            resolveEntries = resolve;
+        });
+        const repository: QuizScheduleRepository = {
+            listEntries: vi.fn(async () => entriesPromise),
+            updateQuizSchedule: vi.fn(async () => undefined)
+        };
+        const scheduler = new QuizScheduler({
+            repository,
+            now: () => now,
+            canStartQuiz: () => canStart,
+            canAnswerQuiz: () => canStart
+        });
+
+        const selection = scheduler.selectQuizQuestions(1);
+        canStart = false;
+        resolveEntries(entriesFixture());
+
+        await expect(selection).resolves.toEqual([]);
+    });
 });

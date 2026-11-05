@@ -85,6 +85,8 @@ export class QuizScheduler {
             return [];
 
         const entries = await this.repository.listEntries({ limit: 10_000 });
+        if (this.preferences.paused || !this.canStartQuiz())
+            return [];
         const nowMs = this.now().getTime();
         const dueEntries = entries
             .filter((entry) => Date.parse(entry.nextDueAt) <= nowMs)

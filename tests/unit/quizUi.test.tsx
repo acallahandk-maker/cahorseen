@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import {
+    act,
+    cleanup,
+    render,
+    screen,
+    waitFor
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import App from '../../src/renderer/App';
 import QuizBubble, {
     quizOutcomeToMascotEvent
 } from '../../src/renderer/pet/QuizBubble';
@@ -11,6 +19,10 @@ import type {
     QuizFeedback,
     QuizQuestion
 } from '../../src/shared/contracts';
+
+vi.mock('../../src/renderer/pet/PetWindow', () => ({
+    default: ({ children }: { children?: ReactNode }) => <div>{children}</div>
+}));
 
 const question: QuizQuestion = {
     id: 'question-1',
@@ -28,8 +40,35 @@ function feedback(overrides: Partial<QuizFeedback> = {}): QuizFeedback {
     };
 }
 
+function installDesktopPetApi(
+    overrides: Record<string, unknown> = {}
+): Window['desktopPet'] {
+    const api = {
+        quiz: {
+            selectQuizQuestions: vi.fn(async () => []),
+            recordQuizAnswer: vi.fn(async () => feedback()),
+            setQuizPreferences: vi.fn(async () => undefined)
+        },
+        captureSelectionOnce: vi.fn(async () => ({
+            sourceText: 'selected text',
+            method: 'clipboard',
+            clipboardRestored: true
+        })),
+        onTranslationEvent: vi.fn(() => () => undefined),
+        onSelectionShortcut: vi.fn(() => () => undefined),
+        onScreenshotSelection: vi.fn(() => () => undefined),
+        ...overrides
+    };
+    Object.defineProperty(window, 'desktopPet', {
+        configurable: true,
+        value: api
+    });
+    return api as unknown as Window['desktopPet'];
+}
+
 afterEach(() => {
     cleanup();
+    Reflect.deleteProperty(window, 'desktopPet');
 });
 
 describe('QuizBubble', () => {
@@ -79,7 +118,27 @@ describe('QuizBubble', () => {
 
         await user.click(screen.getByRole('button', { name: /answer option 2/i }));
         await waitFor(() => expect(screen.getByText('Not quite')).toBeDefined());
+        rerender(
+            <QuizBubble
+                question={{ ...question, id: 'question-2' }}
+                paused={false}
+                onAnswer={onAnswer}
+                onSkip={onSkip}
+                onPauseChange={onPauseChange}
+                onMascotEvent={onMascotEvent}
+            />
+        );
         await user.click(screen.getByRole('button', { name: 'Skip' }));
+        rerender(
+            <QuizBubble
+                question={{ ...question, id: 'question-3' }}
+                paused={false}
+                onAnswer={onAnswer}
+                onSkip={onSkip}
+                onPauseChange={onPauseChange}
+                onMascotEvent={onMascotEvent}
+            />
+        );
         await user.click(screen.getByRole('button', { name: 'Pause quizzes' }));
 
         expect(onMascotEvent.mock.calls.map(([event]) => event)).toEqual([
@@ -107,5 +166,114 @@ describe('QuizBubble', () => {
         expect(screen.getByRole('button', { name: /answer option 1/i })).toHaveProperty('disabled', true);
         expect(screen.getByRole('button', { name: 'Skip' })).toHaveProperty('disabled', true);
         expect(screen.getByRole('button', { name: 'Resume quizzes' })).toBeDefined();
+    });
+
+    it('locks answer and skip controls after terminal feedback', async () => {
+        const user = userEvent.setup();
+        const onAnswer = vi.fn(async () => feedback({ correct: true }));
+        const onSkip = vi.fn(async () => feedback());
+        render(
+            <QuizBubble
+                question={question}
+                paused={false}
+                onAnswer={onAnswer}
+                onSkip={onSkip}
+                onPauseChange={vi.fn()}
+            />
+        );
+
+        await user.click(screen.getByRole('button', { name: /answer option 1/i }));
+        await screen.findByText('Correct');
+        await user.click(screen.getByRole('button', { name: /answer option 2/i }));
+        await user.click(screen.getByRole('button', { name: 'Skip' }));
+
+        expect(onAnswer).toHaveBeenCalledExactlyOnceWith(0);
+        expect(onSkip).not.toHaveBeenCalled();
+    });
+
+    it('shows an error and locks controls when an answer submission rejects', async () => {
+        const user = userEvent.setup();
+        const onAnswer = vi.fn(async (): Promise<QuizFeedback> => {
+            throw new Error('Answer submission failed.');
+        });
+        const onSkip = vi.fn(async () => feedback());
+        render(
+            <QuizBubble
+                question={question}
+                paused={false}
+                onAnswer={onAnswer}
+                onSkip={onSkip}
+                onPauseChange={vi.fn()}
+            />
+        );
+
+        await user.click(screen.getByRole('button', { name: /answer option 1/i }));
+
+        expect((await screen.findByRole('alert')).textContent).toBe(
+            'Answer submission failed.'
+        );
+        expect(screen.getByRole('button', { name: /answer option 2/i }))
+            .toHaveProperty('disabled', true);
+        expect(screen.getByRole('button', { name: 'Skip' }))
+            .toHaveProperty('disabled', true);
+        expect(onAnswer).toHaveBeenCalledExactlyOnceWith(0);
+        expect(onSkip).not.toHaveBeenCalled();
+    });
+
+    it('shows an error and locks controls when a skip submission rejects', async () => {
+        const user = userEvent.setup();
+        const onAnswer = vi.fn(async () => feedback({ correct: true }));
+        const onSkip = vi.fn(async (): Promise<QuizFeedback> => {
+            throw new Error('Skip submission failed.');
+        });
+        render(
+            <QuizBubble
+                question={question}
+                paused={false}
+                onAnswer={onAnswer}
+                onSkip={onSkip}
+                onPauseChange={vi.fn()}
+            />
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Skip' }));
+
+        expect((await screen.findByRole('alert')).textContent).toBe(
+            'Skip submission failed.'
+        );
+        expect(screen.getByRole('button', { name: /answer option 1/i }))
+            .toHaveProperty('disabled', true);
+        expect(screen.getByRole('button', { name: 'Skip' }))
+            .toHaveProperty('disabled', true);
+        expect(onSkip).toHaveBeenCalledTimes(1);
+        expect(onAnswer).not.toHaveBeenCalled();
+    });
+
+    it('does not display a quiz delivered after translation becomes active', async () => {
+        const user = userEvent.setup();
+        let resolveQuiz!: (questions: QuizQuestion[]) => void;
+        const quizRequest = new Promise<QuizQuestion[]>((resolve) => {
+            resolveQuiz = resolve;
+        });
+        const api = installDesktopPetApi({
+            quiz: {
+                selectQuizQuestions: vi.fn(async () => quizRequest),
+                recordQuizAnswer: vi.fn(async () => feedback()),
+                setQuizPreferences: vi.fn(async () => undefined)
+            },
+            captureSelectionOnce: vi.fn(async () => new Promise<never>(() => undefined))
+        });
+
+        render(<App />);
+        await waitFor(() => expect(api.quiz.selectQuizQuestions).toHaveBeenCalledTimes(1));
+        await user.click(screen.getByRole('button', { name: 'Translate selection' }));
+        await waitFor(() => expect(api.captureSelectionOnce).toHaveBeenCalledTimes(1));
+
+        await act(async () => {
+            resolveQuiz([question]);
+            await Promise.resolve();
+        });
+
+        expect(screen.queryByRole('region', { name: 'Vocabulary quiz' })).toBeNull();
     });
 });

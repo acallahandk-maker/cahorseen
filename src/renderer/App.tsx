@@ -156,6 +156,7 @@ function PetApp(): React.JSX.Element {
     const [quizQuestion, setQuizQuestion] = useState<QuizQuestion>();
     const [quizPaused, setQuizPaused] = useState(false);
     const quizPausedRef = useRef(false);
+    const quizLoadGenerationRef = useRef(0);
     const [mascotEvents, setMascotEvents] = useState<readonly MascotEvent[]>([]);
     const [mascotBatchId, setMascotBatchId] = useState(0);
     const emitMascotEvents = useCallback((events: readonly MascotEvent[]): void => {
@@ -163,15 +164,27 @@ function PetApp(): React.JSX.Element {
         setMascotBatchId((current) => current + 1);
     }, []);
     const loadQuiz = useCallback(async (): Promise<void> => {
+        const requestGeneration = ++quizLoadGenerationRef.current;
         if (translationBusyRef.current || quizPausedRef.current)
             return;
         try {
             const [question] = await window.desktopPet.quiz.selectQuizQuestions(1);
+            if (
+                requestGeneration !== quizLoadGenerationRef.current
+                || translationBusyRef.current
+                || quizPausedRef.current
+            )
+                return;
             setQuizQuestion(question);
             if (question !== undefined)
                 emitMascotEvents(['quizzing']);
         } catch {
-            setQuizQuestion(undefined);
+            if (
+                requestGeneration === quizLoadGenerationRef.current
+                && !translationBusyRef.current
+                && !quizPausedRef.current
+            )
+                setQuizQuestion(undefined);
         }
     }, [emitMascotEvents]);
     const runTranslationExclusive = useCallback(async (
@@ -180,6 +193,7 @@ function PetApp(): React.JSX.Element {
         if (translationBusyRef.current)
             return;
         translationBusyRef.current = true;
+        quizLoadGenerationRef.current += 1;
         setTranslationBusy(true);
         setQuizQuestion(undefined);
         try {

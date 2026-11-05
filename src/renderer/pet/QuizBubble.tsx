@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
     MascotEvent,
     QuizFeedback,
@@ -29,6 +29,12 @@ export function quizOutcomeToMascotEvent(outcome: QuizOutcome): MascotEvent {
     }
 }
 
+function submissionErrorMessage(error: unknown): string {
+    return error instanceof Error && error.message.trim().length > 0
+        ? error.message
+        : 'Quiz submission failed.';
+}
+
 export default function QuizBubble({
     question,
     paused,
@@ -40,17 +46,27 @@ export default function QuizBubble({
 }: QuizBubbleProps): React.JSX.Element {
     const [feedback, setFeedback] = useState<QuizFeedback>();
     const [feedbackLabel, setFeedbackLabel] = useState('Correct');
+    const [submissionError, setSubmissionError] = useState<string>();
     const [busy, setBusy] = useState(false);
+    const submissionInFlightRef = useRef(false);
+    const terminalSubmissionRef = useRef(false);
+    const terminal = feedback !== undefined || submissionError !== undefined;
 
     useEffect(() => {
         setFeedback(undefined);
         setFeedbackLabel('Correct');
-    }, [question.id]);
+        setSubmissionError(undefined);
+        submissionInFlightRef.current = false;
+        terminalSubmissionRef.current = false;
+    }, [question]);
 
     const answer = async (optionIndex: number): Promise<void> => {
-        if (paused || busy)
+        if (paused || busy || terminalSubmissionRef.current)
             return;
+        submissionInFlightRef.current = true;
+        terminalSubmissionRef.current = true;
         setBusy(true);
+        setSubmissionError(undefined);
         try {
             const result = await onAnswer(optionIndex);
             setFeedback(result);
@@ -58,31 +74,56 @@ export default function QuizBubble({
             onMascotEvent?.(quizOutcomeToMascotEvent(
                 result.correct ? 'correct' : 'wrong'
             ));
+        } catch (error) {
+            setSubmissionError(submissionErrorMessage(error));
         } finally {
+            submissionInFlightRef.current = false;
             setBusy(false);
         }
     };
 
     const skip = async (): Promise<void> => {
-        if (paused || busy)
+        if (paused || busy || terminalSubmissionRef.current)
             return;
+        submissionInFlightRef.current = true;
+        terminalSubmissionRef.current = true;
         setBusy(true);
+        setSubmissionError(undefined);
         try {
             setFeedback(await onSkip());
             setFeedbackLabel('Skipped');
             onMascotEvent?.(quizOutcomeToMascotEvent('skipped'));
+        } catch (error) {
+            setSubmissionError(submissionErrorMessage(error));
         } finally {
+            submissionInFlightRef.current = false;
             setBusy(false);
         }
     };
 
     const togglePaused = async (): Promise<void> => {
-        if (busy)
+        if (busy || submissionInFlightRef.current)
             return;
         setBusy(true);
+        setSubmissionError(undefined);
         try {
             await onPauseChange(!paused);
             onMascotEvent?.(quizOutcomeToMascotEvent('paused'));
+        } catch (error) {
+            setSubmissionError(submissionErrorMessage(error));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const next = async (): Promise<void> => {
+        if (onNext === undefined || busy || submissionInFlightRef.current)
+            return;
+        setBusy(true);
+        try {
+            await onNext();
+        } catch (error) {
+            setSubmissionError(submissionErrorMessage(error));
         } finally {
             setBusy(false);
         }
@@ -99,30 +140,39 @@ export default function QuizBubble({
                         key={option}
                         type="button"
                         aria-label={`Answer option ${optionIndex + 1}: ${option}`}
-                        disabled={paused || busy}
+                        disabled={paused || busy || terminal}
                         onClick={() => void answer(optionIndex)}
                     >
                         {option}
                     </button>
                 ))}
             </div>
-            {feedback === undefined ? null : (
-                <>
-                    <output aria-live="polite">
-                        {feedbackLabel}
-                    </output>
-                    {onNext === undefined ? null : (
-                        <button
-                            type="button"
-                            disabled={paused || busy}
-                            onClick={() => void onNext()}
-                        >
-                            Next question
-                        </button>
-                    )}
-                </>
+            {submissionError === undefined ? null : (
+                <output role="alert" aria-live="assertive">
+                    {submissionError}
+                </output>
             )}
-            <button type="button" disabled={paused || busy} onClick={() => void skip()}>
+            {terminal && onNext !== undefined ? (
+                <>
+                    {feedback === undefined ? null : (
+                        <output aria-live="polite">
+                            {feedbackLabel}
+                        </output>
+                    )}
+                    <button type="button" disabled={busy} onClick={() => void next()}>
+                        Next question
+                    </button>
+                </>
+            ) : feedback === undefined ? null : (
+                <output aria-live="polite">
+                    {feedbackLabel}
+                </output>
+            )}
+            <button
+                type="button"
+                disabled={paused || busy || terminal}
+                onClick={() => void skip()}
+            >
                 Skip
             </button>
             <button type="button" disabled={busy} onClick={() => void togglePaused()}>
