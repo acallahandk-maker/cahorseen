@@ -8,6 +8,7 @@ import type {
     TranslationRetryInput,
     TranslationTask,
     PerformanceMode,
+    ResourcePressureMetrics,
     QuizQuestion,
     QuizApi,
     VocabularyRepositoryFacade
@@ -36,6 +37,7 @@ interface DesktopPetApi {
     }) => Promise<TranslationTask>;
     translateScreenshot: (bounds: ScreenBounds) => Promise<TranslationTask>;
     getPerformanceMode: () => Promise<PerformanceMode>;
+    getResourcePressure: () => Promise<ResourcePressureMetrics>;
     onPerformanceChange: (
         listener: (mode: PerformanceMode) => void
     ) => () => void;

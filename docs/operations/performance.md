@@ -11,20 +11,24 @@
 | Interaction feedback excluding network | below 200 ms |
 | Eight-hour idle private-memory growth | at most 25 MB |
 
-`npm run profile:performance` measures the Electron process tree on Windows. CPU is derived from `Win32_Process` user and kernel time deltas, private memory is summed over the root and descendants, normal memory is the median of the idle interval, and peak memory is the maximum measured process-tree private byte count. Interaction latency is measured through a local synthetic provider, so the result excludes network time.
+`npm run profile:performance` runs on Windows. Idle CPU is calculated from `Win32_Process` user and kernel time only across a dedicated no-work interval. Active CPU is read from Electron `app.getAppMetrics()` immediately around the production selection and screenshot work window, with no deliberate sleeps or post-workload tail in that window. Normal private memory is the Electron process total before active work. Screenshot peak private memory is sampled from the same trusted Electron metric at 1 ms intervals while a real `ScreenshotService` capture is retained by its translation workload.
+
+The repeatable profile harness uses Chromium software rendering (`--disable-gpu`) so private-byte and CPU measurements do not depend on a hardware GPU. The full-flow release test separately boots the model with SwiftShader and exercises animation reduction, static fallback, and reload recovery under pressure.
+
+Interaction latency is measured from a renderer `pointerdown` event to the next rendered frame, excluding provider network time.
 
 ## Accelerated Drift Evidence
 
-The default profile runs a fixed 126-second accelerated sampling window and maps its observed process-tree memory samples uniformly across an eight-hour-equivalent interval. The report labels this as `accelerated-8-hour-equivalent`, records the actual sample count, equivalent sample spacing, and sampled wall-clock duration, and does not claim that eight literal hours were measured. The growth value is calculated from observed process-tree private-memory samples in the generated `out/performance-profile.json`; it is not a synthetic growth curve.
+The default profile executes 480 local vocabulary-maintenance cycles and records process private bytes after every cycle. The model declares one virtual minute per cycle, so 480 executed cycles cover an eight-hour-equivalent workload model. The report labels this evidence `accelerated-workload-cycles`, records `executedCycles: 480`, and never converts a short wall-clock interval into an eight-hour measurement.
 
-Use the real-run command when wall-clock evidence is required:
+This deterministic accelerated evidence is not a literal eight-hour measurement. Use the real-run command when wall-clock evidence is required:
 
 ```powershell
 npm run profile:performance -- --real-idle-hours 8
 ```
 
-That command samples once per minute for eight hours and labels the drift result `real-wall-clock`. A shorter diagnostic run can use `--real-idle-hours 0.1`; only the requested wall-clock duration is claimed.
+That command samples once per minute for eight hours and labels the drift result `real-wall-clock` with `measuredHours: 8`. A shorter diagnostic run can use `--real-idle-hours 0.1`; only the requested wall-clock duration is claimed.
 
 ## Mascot Pressure Policy
 
-The renderer samples JavaScript heap pressure and recent local interaction latency. Under moderate pressure it keeps the Live2D model loaded but disables automatic interaction and reduces the ticker to the idle frame rate. Only three consecutive critical-pressure samples select the static mascot, so animation resources are reduced before static fallback. If memory or latency recovers after static fallback, the model reloads through the normal model lifecycle.
+The renderer receives process private bytes through the trusted `desktop-pet:resource-pressure-get` IPC boundary, backed by Electron `app.getAppMetrics()`. Recent interaction latency is measured from input event to rendered frame. Under moderate pressure the Live2D model remains loaded while automatic interaction is disabled and the ticker drops to the idle frame rate. Three consecutive critical-pressure samples select the static mascot, so animation resources are reduced first. When pressure clears, the static fallback is removed and the Live2D model is reloaded through the normal model lifecycle.

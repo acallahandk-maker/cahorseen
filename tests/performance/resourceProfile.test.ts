@@ -9,7 +9,7 @@ import {
     it
 } from 'vitest';
 import {
-    accelerateIdleDrift,
+    evaluateAcceleratedIdleDrift,
     evaluatePerformanceProfile,
     resolveMascotResourceMode,
     ResourcePressureGovernor,
@@ -48,19 +48,40 @@ describe('performance profile release gate', () => {
         });
     });
 
-    it('reports accelerated eight-hour drift evidence without claiming a wall-clock run', () => {
-        const drift = accelerateIdleDrift({
+    it('accepts only executed workload-cycle evidence for accelerated idle drift', () => {
+        const drift = evaluateAcceleratedIdleDrift({
             startPrivateBytes: 200 * 1024 * 1024,
-            samples: [200 * 1024 * 1024, 250 * 1024 * 1024],
-            simulatedHours: 8,
-            wallClockDurationMs: 120_000
+            samples: Array.from({ length: 480 }, (_, index) => (
+                200 * 1024 * 1024 + index * 100 * 1024
+            )),
+            cycleModel: {
+                kind: 'idle-equivalent-local-maintenance',
+                virtualHours: 8,
+                minutesPerCycle: 1,
+                cycleCount: 480
+            },
+            wallClockDurationMs: 12_000
         });
 
-        expect(drift.measurementKind).toBe('accelerated-8-hour-equivalent');
-        expect(drift.simulatedHours).toBe(8);
-        expect(drift.wallClockDurationMs).toBe(120_000);
-        expect(drift.wallClockHoursMeasured).toBe(120_000 / 3_600_000);
+        expect(drift.measurementKind).toBe('accelerated-workload-cycles');
+        expect(drift.executedCycles).toBe(480);
+        expect(drift.equivalentHours).toBe(8);
+        expect(drift.growthBytes).toBe(479 * 100 * 1024);
         expect(drift.pass).toBe(false);
+    });
+
+    it('rejects short sample sets that did not execute the declared workload cycles', () => {
+        expect(() => evaluateAcceleratedIdleDrift({
+            startPrivateBytes: 200 * 1024 * 1024,
+            samples: [200 * 1024 * 1024, 201 * 1024 * 1024],
+            cycleModel: {
+                kind: 'idle-equivalent-local-maintenance',
+                virtualHours: 8,
+                minutesPerCycle: 1,
+                cycleCount: 480
+            },
+            wallClockDurationMs: 1_000
+        })).toThrow(/480 workload-cycle samples/);
     });
 });
 

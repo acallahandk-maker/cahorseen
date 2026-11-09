@@ -15,7 +15,11 @@ it('exercises translation, learning, privacy, pause, and shutdown gates end to e
         },
         screenshot: {
             translatedText: 'Image text',
-            retainedScreenshotBytes: 0
+            sourceText: 'Image text',
+            captureCount: 1,
+            retainedScreenshotBytes: 0,
+            activeCaptureCount: 0,
+            captureBufferCleared: true
         },
         providerError: {
             code: 'rate-limited',
@@ -23,12 +27,13 @@ it('exercises translation, learning, privacy, pause, and shutdown gates end to e
         },
         memoryHeat: {
             sourceText: 'Hello',
-            occurrenceCount: 2
+            occurrenceCount: 2,
+            entryCount: 5
         },
         quiz: {
             scheduledIntervalDays: 3,
-            paused: true,
-            pausedSelectionCount: 0
+            selectedBeforePause: 1,
+            selectedWhilePaused: 0
         },
         secret: {
             masked: '••••••••',
@@ -37,16 +42,32 @@ it('exercises translation, learning, privacy, pause, and shutdown gates end to e
             exposedSecretFields: []
         },
         pause: {
-            reason: 'paused',
-            frameRate: 0,
-            suppressed: true
+            before: {
+                reason: 'normal',
+                frameRate: 30,
+                suppressed: false
+            },
+            paused: {
+                reason: 'paused',
+                frameRate: 0,
+                suppressed: true
+            },
+            afterResume: {
+                reason: 'normal',
+                frameRate: 30,
+                suppressed: false
+            }
         },
         resourcePressure: {
-            reducedBeforeStatic: true
+            reducedObserved: true,
+            staticObserved: true,
+            recoveredRenderMode: 'live2d',
+            privateMemoryBasis: 'electron-app-metrics-private-bytes',
+            interactionLatencyBasis: 'input-event-to-rendered-frame'
         }
     });
     expect(result.diagnostics?.persistedScreenshotFiles).toEqual([]);
     expect(result.diagnostics?.leakedProcessIds).toEqual([]);
     expect(result.diagnostics?.stdout).not.toContain(syntheticSecret);
     expect(result.diagnostics?.stderr).not.toContain(syntheticSecret);
-}, 20_000);
+}, 40_000);

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-    accelerateIdleDrift,
+    evaluateAcceleratedIdleDrift,
     evaluatePerformanceProfile,
     PERFORMANCE_TARGETS
 } from '../src/shared/performanceProfile.ts';
@@ -94,13 +94,6 @@ function cpuPercent(samples) {
     return elapsedMs <= 0 ? 0 : cpuMicros / 1000 / elapsedMs * 100;
 }
 
-function median(values) {
-    if (values.length === 0)
-        return 0;
-    const sorted = [...values].sort((left, right) => left - right);
-    return sorted[Math.floor(sorted.length / 2)];
-}
-
 function parseRealIdleHours(args) {
     const index = args.indexOf('--real-idle-hours');
     if (index === -1)
@@ -112,9 +105,9 @@ function parseRealIdleHours(args) {
 function parseAcceleratedSeconds(args) {
     const index = args.indexOf('--accelerated-seconds');
     if (index === -1)
-        return 126;
+        return 12;
     const value = Number(args[index + 1]);
-    return Number.isFinite(value) && value > 0 ? value : 126;
+    return Number.isFinite(value) && value > 0 ? value : 12;
 }
 
 function parseMarker(stdout) {
@@ -136,7 +129,9 @@ async function runProfile() {
         : Math.round(acceleratedSeconds * 1_000);
     const sampleIntervalMs = realIdleHours > 0 ? 60_000 : 250;
     const userDataDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-performance-'));
+    const scratchDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-performance-scratch-'));
     temporaryDirectories.push(userDataDir);
+    temporaryDirectories.push(scratchDir);
     const child = spawn(electronPath, [
         '--no-sandbox',
         '--disable-gpu',
@@ -147,7 +142,8 @@ async function runProfile() {
         env: {
             ...process.env,
             DESKTOP_PET_SMOKE_SCENARIO: 'resource-profile',
-            DESKTOP_PET_PROFILE_IDLE_MS: String(idleWaitMs)
+            DESKTOP_PET_PROFILE_IDLE_MS: String(idleWaitMs),
+            DESKTOP_PET_TEST_SCRATCH_DIR: scratchDir
         },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
@@ -170,7 +166,8 @@ async function runProfile() {
         const snapshot = treeSnapshot(child.pid);
         samples.push({
             ...snapshot,
-            elapsedMs: Date.now() - startedAt
+            elapsedMs: Date.now() - startedAt,
+            observedAtMs: Date.now()
         });
     }, sampleIntervalMs);
     const exitCode = await new Promise((resolve, reject) => {
@@ -182,63 +179,75 @@ async function runProfile() {
         throw new Error(`Performance harness exited with code ${String(exitCode)}\n${stderr}`);
     const marker = parseMarker(stdout);
     const resourceProfile = marker.payload?.resourceProfile ?? {};
+    const idleStartedAtMs = Number(resourceProfile.idleStartedAtMs ?? 0);
+    const idleEndedAtMs = Number(resourceProfile.idleEndedAtMs ?? 0);
     const idleSamples = samples.filter((sample) => (
-        sample.elapsedMs >= Math.min(5_000, idleWaitMs / 4)
-        && sample.elapsedMs < idleWaitMs - (realIdleHours > 0 ? 60_000 : 250)
+        sample.observedAtMs >= idleStartedAtMs
+        && sample.observedAtMs <= idleEndedAtMs
     ));
-    const activeSamples = samples.filter((sample) => sample.elapsedMs >= idleWaitMs);
-    const normalPrivateBytes = median(idleSamples.map((sample) => sample.privateBytes));
-    const peakPrivateBytes = Math.max(
-        normalPrivateBytes,
-        ...activeSamples.map((sample) => sample.privateBytes)
-    );
-    const idleCpuPercent = cpuPercent(idleSamples);
-    const activeCpuPercent = cpuPercent(activeSamples);
+    const stableIdleSamples = idleSamples.filter((sample) => (
+        sample.observedAtMs >= idleStartedAtMs + 2_000
+        && sample.observedAtMs <= idleEndedAtMs - 2_000
+    ));
+    if (stableIdleSamples.length < 2)
+        throw new Error('Performance harness did not collect a distinct idle interval');
+    const idleCpuPercent = cpuPercent(stableIdleSamples);
     const measurement = {
         idleCpuPercent,
-        activeCpuPercent,
-        normalPrivateBytes,
-        peakPrivateBytes,
+        activeCpuPercent: Number(resourceProfile.activeCpuPercent ?? 0),
+        normalPrivateBytes: Number(resourceProfile.normalPrivateBytes ?? 0),
+        peakPrivateBytes: Number(resourceProfile.peakPrivateBytes ?? 0),
         interactionLatencyMs: Number(resourceProfile.interactionLatencyMs ?? 0)
     };
-    const startPrivateBytes = idleSamples[0]?.privateBytes ?? normalPrivateBytes;
-    const endPrivateBytes = idleSamples.at(-1)?.privateBytes ?? normalPrivateBytes;
-    const wallClockDurationMs = idleSamples.length < 2
-        ? 0
-        : (idleSamples.at(-1)?.elapsedMs ?? 0) - (idleSamples[0]?.elapsedMs ?? 0);
     const drift = realIdleHours > 0
         ? {
             measurementKind: 'real-wall-clock',
-            simulatedHours: realIdleHours,
-            wallClockDurationMs,
-            wallClockHoursMeasured: wallClockDurationMs / 3_600_000,
-            startPrivateBytes,
-            endPrivateBytes,
-            growthBytes: endPrivateBytes - startPrivateBytes,
+            measuredHours: realIdleHours,
+            wallClockDurationMs: Math.max(0, idleEndedAtMs - idleStartedAtMs),
+            startPrivateBytes: idleSamples[0]?.privateBytes ?? 0,
+            endPrivateBytes: idleSamples.at(-1)?.privateBytes ?? 0,
+            growthBytes: (idleSamples.at(-1)?.privateBytes ?? 0) - (idleSamples[0]?.privateBytes ?? 0),
             sampleCount: idleSamples.length,
             targetBytes: 25 * 1024 * 1024,
-            pass: endPrivateBytes - startPrivateBytes <= 25 * 1024 * 1024
+            pass: (idleSamples.at(-1)?.privateBytes ?? 0) - (idleSamples[0]?.privateBytes ?? 0)
+                <= 25 * 1024 * 1024
         }
-        : accelerateIdleDrift({
-            startPrivateBytes,
-            samples: idleSamples.map((sample) => sample.privateBytes),
-            simulatedHours: 8,
-            wallClockDurationMs
+        : evaluateAcceleratedIdleDrift({
+            startPrivateBytes: Number(resourceProfile.driftStartPrivateBytes ?? 0),
+            samples: resourceProfile.driftSamples,
+            cycleModel: {
+                kind: 'idle-equivalent-local-maintenance',
+                virtualHours: 8,
+                minutesPerCycle: 1,
+                cycleCount: 480
+            },
+            wallClockDurationMs: Number(resourceProfile.driftWallClockDurationMs ?? 0)
         });
     const evaluation = evaluatePerformanceProfile(measurement);
     const report = {
         measurementKind: realIdleHours > 0
             ? 'electron-real-wall-clock-profile'
-            : 'electron-profile-with-accelerated-8-hour-equivalent-idle-drift',
+            : 'electron-profile-with-accelerated-workload-cycles',
         generatedAt: new Date().toISOString(),
         platform: process.platform,
         sampleIntervalMs,
         idleEquivalentHours: 8,
-        equivalentSampleSpacingMinutes: realIdleHours > 0
-            ? 1
-            : 8 * 60 / Math.max(1, idleSamples.length),
+        equivalentSampleSpacingMinutes: 1,
         interactionLatencyScope: 'local synthetic provider; excludes network',
-        activeWorkload: 'synthetic selection and screenshot translations',
+        activeWorkload: 'production selection and screenshot services with local provider HTTP',
+        activeCpuBasis: 'electron-app-metrics-active-work-window',
+        screenshotPeakBasis: 'electron-app-metrics-private-bytes-fine-sampled',
+        interactionLatencyBasis: String(
+            resourceProfile.interactionLatencyBasis ?? ''
+        ),
+        activeWindowMs: Number(resourceProfile.activeWindowMs ?? 0),
+        screenshotCaptureCount: Number(resourceProfile.screenshotCaptureCount ?? 0),
+        screenshotPeakPrivateBytes: Number(
+            resourceProfile.screenshotPeakPrivateBytes ?? 0
+        ),
+        idleDriftBasis: realIdleHours > 0
+            ? 'electron-app-metrics-private-bytes-real-wall-clock'
+            : 'electron-app-metrics-private-bytes-executed-workload-cycles',
         realRunCommand: 'npm run profile:performance -- --real-idle-hours 8',
         targets: PERFORMANCE_TARGETS,
         measurement,

@@ -799,6 +799,8 @@ export default function Live2DStage({
     const modelHandleRef = useRef<MascotHandle | undefined>(undefined);
     const pressureGovernorRef = useRef(new ResourcePressureGovernor());
     const interactionLatencyRef = useRef(0);
+    const pressureFallbackRef = useRef(false);
+    const [modelGeneration, setModelGeneration] = useState(0);
     const [renderMode, setRenderMode] = useState<'live2d' | 'static-fallback'>(
         'static-fallback'
     );
@@ -867,35 +869,61 @@ export default function Live2DStage({
             if (isLive2DSmokeMode())
                 delete window.__desktopPetLive2DSmoke;
         };
-    }, [modelPath]);
+    }, [modelGeneration, modelPath]);
 
     useEffect(() => {
         const handle = modelHandleRef.current;
-        if (handle !== undefined) {
-            const startedAt = window.performance.now();
-            void setMascotState(handle, state).finally(() => {
-                interactionLatencyRef.current = window.performance.now() - startedAt;
-            });
-        }
+        if (handle !== undefined)
+            void setMascotState(handle, state);
     }, [renderMode, state]);
 
     useEffect(() => {
         const samplePressure = (): void => {
-            const memory = (window.performance as Performance & {
-                memory?: { usedJSHeapSize?: number };
-            }).memory;
-            setResourceMode(pressureGovernorRef.current.observe({
-                privateBytes: memory?.usedJSHeapSize ?? 0,
-                interactionLatencyMs: interactionLatencyRef.current
-            }));
-            interactionLatencyRef.current = 0;
+            const desktopPet = (window as unknown as {
+                desktopPet?: {
+                    getResourcePressure?: () => Promise<{
+                        privateBytes: number;
+                    }>;
+                };
+            }).desktopPet;
+            const getResourcePressure = desktopPet?.getResourcePressure;
+            if (typeof getResourcePressure !== 'function')
+                return;
+            void getResourcePressure().then((metrics: { privateBytes: number }) => {
+                setResourceMode(pressureGovernorRef.current.observe({
+                    privateBytes: metrics.privateBytes,
+                    interactionLatencyMs: interactionLatencyRef.current
+                }));
+            }).catch(() => undefined);
         };
         samplePressure();
-        const interval = window.setInterval(samplePressure, 1_000);
+        const interval = window.setInterval(samplePressure, 2_000);
         return () => window.clearInterval(interval);
     }, []);
 
     useEffect(() => {
+        const container = containerRef.current;
+        if (container === null)
+            return;
+        const recordInteraction = (event: PointerEvent): void => {
+            const startedAt = event.timeStamp;
+            window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(() => {
+                    interactionLatencyRef.current = window.performance.now() - startedAt;
+                    container.dataset.interactionLatencyBasis =
+                        'input-event-to-rendered-frame';
+                    container.dataset.interactionLatencyMs =
+                        interactionLatencyRef.current.toFixed(3);
+                });
+            });
+        };
+        container.addEventListener('pointerdown', recordInteraction);
+        return () => container.removeEventListener('pointerdown', recordInteraction);
+    }, []);
+
+    useEffect(() => {
+        if (resourceMode === 'static')
+            interactionLatencyRef.current = 0;
         const handle = modelHandleRef.current;
         const app = appRef.current;
         if (handle === undefined || app === undefined)
@@ -911,6 +939,7 @@ export default function Live2DStage({
         }
         if (resourceMode !== 'static')
             return;
+        pressureFallbackRef.current = true;
         disposeMascotModel(handle);
         modelHandleRef.current = undefined;
         app.destroy(true, {
@@ -920,6 +949,17 @@ export default function Live2DStage({
         });
         appRef.current = undefined;
         setRenderMode('static-fallback');
+    }, [renderMode, resourceMode]);
+
+    useEffect(() => {
+        if (
+            resourceMode === 'static'
+            || renderMode !== 'static-fallback'
+            || !pressureFallbackRef.current
+        )
+            return;
+        pressureFallbackRef.current = false;
+        setModelGeneration((generation) => generation + 1);
     }, [renderMode, resourceMode]);
 
     useEffect(() => {

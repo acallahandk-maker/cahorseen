@@ -14,6 +14,8 @@ import {
     quizQuestionSchema,
     performanceIpcChannels,
     performanceModeSchema,
+    resourcePressureIpcChannels,
+    resourcePressureMetricsSchema,
     selectionCaptureStartSchema,
     selectionCaptureSchema,
     screenBoundsSchema,
@@ -37,6 +39,7 @@ import {
     type QuizFeedback,
     type QuizPreferencesPatch,
     type PerformanceMode,
+    type ResourcePressureMetrics,
     type SelectionCapture,
     type ScreenBounds,
     type SettingsPreferences,
@@ -84,6 +87,7 @@ export interface DesktopPetApi {
     getSettings: () => Promise<SettingsState>;
     saveSettings: (preferences: SettingsPreferences) => Promise<SettingsState>;
     getPerformanceMode: () => Promise<PerformanceMode>;
+    getResourcePressure: () => Promise<ResourcePressureMetrics>;
     onPerformanceChange: (
         listener: (mode: PerformanceMode) => void
     ) => () => void;
@@ -210,6 +214,10 @@ const desktopPetApi: DesktopPetApi = {
     getPerformanceMode: async () => parseIpcResult(
         performanceModeSchema,
         await ipcRenderer.invoke(performanceIpcChannels.get, {})
+    ),
+    getResourcePressure: async () => parseIpcResult(
+        resourcePressureMetricsSchema,
+        await ipcRenderer.invoke(resourcePressureIpcChannels.get, {})
     ),
     onPerformanceChange: (listener) => {
         const channelListener = (

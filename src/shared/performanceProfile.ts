@@ -20,11 +20,20 @@ export interface PerformanceEvaluation {
     failures: string[];
 }
 
-export interface IdleDriftEvidence {
-    measurementKind: 'accelerated-8-hour-equivalent' | 'real-wall-clock';
-    simulatedHours: number;
+export interface IdleDriftCycleModel {
+    kind: 'idle-equivalent-local-maintenance';
+    virtualHours: 8;
+    minutesPerCycle: 1;
+    cycleCount: 480;
+}
+
+export interface AcceleratedIdleDriftEvidence {
+    measurementKind: 'accelerated-workload-cycles';
+    executedCycles: number;
+    declaredCycles: number;
+    equivalentHours: number;
+    minutesPerCycle: number;
     wallClockDurationMs: number;
-    wallClockHoursMeasured: number;
     startPrivateBytes: number;
     endPrivateBytes: number;
     growthBytes: number;
@@ -32,6 +41,22 @@ export interface IdleDriftEvidence {
     targetBytes: number;
     pass: boolean;
 }
+
+export interface RealIdleDriftEvidence {
+    measurementKind: 'real-wall-clock';
+    measuredHours: number;
+    wallClockDurationMs: number;
+    startPrivateBytes: number;
+    endPrivateBytes: number;
+    growthBytes: number;
+    sampleCount: number;
+    targetBytes: number;
+    pass: boolean;
+}
+
+export type IdleDriftEvidence =
+    | AcceleratedIdleDriftEvidence
+    | RealIdleDriftEvidence;
 
 export type MascotResourceMode = 'full' | 'reduced' | 'static';
 
@@ -71,21 +96,44 @@ export function evaluatePerformanceProfile(
     };
 }
 
-export function accelerateIdleDrift(options: {
+export function evaluateAcceleratedIdleDrift(options: {
     startPrivateBytes: number;
     samples: readonly number[];
-    simulatedHours: number;
+    cycleModel: IdleDriftCycleModel;
     wallClockDurationMs: number;
     targetBytes?: number;
-}): IdleDriftEvidence {
+}): AcceleratedIdleDriftEvidence {
+    const { cycleModel } = options;
+    if (
+        cycleModel.kind !== 'idle-equivalent-local-maintenance'
+        || cycleModel.virtualHours !== 8
+        || cycleModel.minutesPerCycle !== 1
+        || cycleModel.cycleCount !== 480
+    )
+        throw new Error('Accelerated drift requires the declared 480-cycle, eight-hour-equivalent workload model.');
+    if (options.samples.length !== cycleModel.cycleCount) {
+        throw new Error(
+            `Accelerated drift requires ${cycleModel.cycleCount} workload-cycle samples; received ${options.samples.length}.`
+        );
+    }
+    if (
+        !Number.isFinite(options.startPrivateBytes)
+        || options.startPrivateBytes < 0
+        || !Number.isFinite(options.wallClockDurationMs)
+        || options.wallClockDurationMs <= 0
+        || options.samples.some((sample) => !Number.isFinite(sample) || sample < 0)
+    )
+        throw new Error('Accelerated drift evidence contains invalid measurements.');
     const endPrivateBytes = options.samples.at(-1) ?? options.startPrivateBytes;
     const growthBytes = endPrivateBytes - options.startPrivateBytes;
     const targetBytes = options.targetBytes ?? PERFORMANCE_TARGETS.idleDriftBytes;
     return {
-        measurementKind: 'accelerated-8-hour-equivalent',
-        simulatedHours: options.simulatedHours,
+        measurementKind: 'accelerated-workload-cycles',
+        executedCycles: options.samples.length,
+        declaredCycles: cycleModel.cycleCount,
+        equivalentHours: cycleModel.virtualHours,
+        minutesPerCycle: cycleModel.minutesPerCycle,
         wallClockDurationMs: options.wallClockDurationMs,
-        wallClockHoursMeasured: options.wallClockDurationMs / 3_600_000,
         startPrivateBytes: options.startPrivateBytes,
         endPrivateBytes,
         growthBytes,
@@ -99,8 +147,8 @@ export function resolveMascotResourceMode(
     input: ResourcePressureInput
 ): MascotResourceMode {
     const sustainedPressureSamples = input.sustainedPressureSamples ?? 0;
-    const criticalPressure = input.privateBytes >= PERFORMANCE_TARGETS.peakPrivateBytes
-        || input.interactionLatencyMs >= PERFORMANCE_TARGETS.interactionLatencyMs;
+    const criticalPressure =
+        input.interactionLatencyMs >= PERFORMANCE_TARGETS.interactionLatencyMs;
     if (criticalPressure && sustainedPressureSamples >= 3)
         return 'static';
     const reducedPressure = input.privateBytes >= PERFORMANCE_TARGETS.normalPrivateBytes
@@ -114,8 +162,8 @@ export class ResourcePressureGovernor {
     observe(
         input: Omit<ResourcePressureInput, 'sustainedPressureSamples'>
     ): MascotResourceMode {
-        const criticalPressure = input.privateBytes >= PERFORMANCE_TARGETS.peakPrivateBytes
-            || input.interactionLatencyMs >= PERFORMANCE_TARGETS.interactionLatencyMs;
+        const criticalPressure =
+            input.interactionLatencyMs >= PERFORMANCE_TARGETS.interactionLatencyMs;
         this.sustainedPressureSamples = criticalPressure
             ? Math.min(this.sustainedPressureSamples + 1, 3)
             : 0;

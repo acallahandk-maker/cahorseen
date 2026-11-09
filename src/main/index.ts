@@ -59,6 +59,7 @@ import {
     updateQuizSchedule
 } from './services/memoryDatabase';
 import { QuizScheduler } from './services/quizScheduler';
+import { getElectronResourcePressureMetrics } from './services/resourceMetrics';
 import {
     configurePerformanceWindowEvents,
     createWindowsFullscreenProbe,
@@ -72,7 +73,11 @@ function getRendererUrl(): string {
     const url = new URL(
         process.env.ELECTRON_RENDERER_URL ?? getProductionRendererFileUrl()
     );
-    if (process.env.DESKTOP_PET_SMOKE_SCENARIO === 'live2d-real')
+    if ([
+        'full-flow',
+        'live2d-real',
+        'resource-profile'
+    ].includes(process.env.DESKTOP_PET_SMOKE_SCENARIO ?? ''))
         url.searchParams.set('live2d-smoke', '1');
     return url.href;
 }
@@ -330,6 +335,7 @@ app.whenReady().then(async () => {
         },
         quiz: quizScheduler,
         getPerformanceMode: () => systemIntegration.getPerformanceMode(),
+        getResourcePressure: getElectronResourcePressureMetrics,
         onActiveTranslationChange: (active) => {
             systemIntegration.setActiveTranslation(active);
         },

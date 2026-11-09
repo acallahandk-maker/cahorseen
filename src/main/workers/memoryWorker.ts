@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { parentPort, workerData } from 'node:worker_threads';
+import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import Database from 'better-sqlite3';
 import { caseFold } from 'unicode-case-folding';
 import { z } from 'zod';
@@ -994,7 +994,9 @@ function run(database: DatabaseType): void {
     });
 }
 
-const parsedOptions = databaseOptionsSchema.parse(workerData);
-const database = new Database(parsedOptions.databasePath);
-migrate(database, toIso(Date.now()));
-run(database);
+if (!isMainThread && workerData !== null) {
+    const parsedOptions = databaseOptionsSchema.parse(workerData);
+    const database = new Database(parsedOptions.databasePath);
+    migrate(database, toIso(Date.now()));
+    run(database);
+}

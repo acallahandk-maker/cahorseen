@@ -1,5 +1,12 @@
 import { spawn, spawnSync, type ChildProcessByStdio } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import {
+    closeSync,
+    mkdtempSync,
+    openSync,
+    readSync,
+    readdirSync,
+    rmSync
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -207,6 +214,44 @@ function killElectronProcessTree(child: ElectronSmokeProcess): void {
     child.kill();
 }
 
+export interface ProcessSnapshotResult {
+    status: number | null;
+    stdout: string;
+}
+
+export function parseProcessRows(
+    result: ProcessSnapshotResult,
+    rootPid?: number
+): Array<{ processId: number; parentProcessId: number }> {
+    if (result.status !== 0 || result.stdout.trim() === '')
+        throw new Error('process snapshot failed');
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(result.stdout);
+    } catch {
+        throw new Error('process snapshot failed');
+    }
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    if (rows.length === 0)
+        throw new Error('process snapshot failed');
+    const processRows = rows.map((row) => {
+        if (
+            typeof row !== 'object'
+            || row === null
+            || typeof (row as { ProcessId?: unknown }).ProcessId !== 'number'
+            || typeof (row as { ParentProcessId?: unknown }).ParentProcessId !== 'number'
+        )
+            throw new Error('process snapshot failed');
+        return {
+            processId: (row as { ProcessId: number }).ProcessId,
+            parentProcessId: (row as { ParentProcessId: number }).ParentProcessId
+        };
+    });
+    if (rootPid !== undefined && !processRows.some((row) => row.processId === rootPid))
+        throw new Error('process snapshot failed');
+    return processRows;
+}
+
 function processTreeSnapshot(): Array<{ processId: number; parentProcessId: number }> {
     if (process.platform !== 'win32')
         return [];
@@ -219,27 +264,7 @@ function processTreeSnapshot(): Array<{ processId: number; parentProcessId: numb
         stdio: ['ignore', 'pipe', 'ignore'],
         windowsHide: true
     });
-    if (result.status !== 0 || result.stdout.trim() === '')
-        return [];
-    try {
-        const parsed: unknown = JSON.parse(result.stdout);
-        const rows = Array.isArray(parsed) ? parsed : [parsed];
-        return rows.flatMap((row) => {
-            if (
-                typeof row !== 'object'
-                || row === null
-                || typeof (row as { ProcessId?: unknown }).ProcessId !== 'number'
-                || typeof (row as { ParentProcessId?: unknown }).ParentProcessId !== 'number'
-            )
-                return [];
-            return [{
-                processId: (row as { ProcessId: number }).ProcessId,
-                parentProcessId: (row as { ParentProcessId: number }).ParentProcessId
-            }];
-        });
-    } catch {
-        return [];
-    }
+    return parseProcessRows(result);
 }
 
 function descendantProcessIds(rootPid: number): number[] {
@@ -272,23 +297,66 @@ function runningProcessIds(): Set<number> {
     return new Set(processTreeSnapshot().map((row) => row.processId));
 }
 
-function persistedScreenshotFiles(root: string): string[] {
+function isScreenshotSignature(filePath: string): boolean {
+    const header = Buffer.alloc(16);
+    let descriptor: number | undefined;
+    try {
+        descriptor = openSync(filePath, 'r');
+        readSync(descriptor, header, 0, header.length, 0);
+    } catch {
+        throw new Error('screenshot persistence scan failed');
+    } finally {
+        if (typeof descriptor === 'number')
+            closeSync(descriptor);
+    }
+    return header.subarray(0, 8).equals(Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+    ]))
+        || header.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+        || (header.subarray(0, 4).toString('ascii') === 'RIFF'
+            && header.subarray(8, 12).toString('ascii') === 'WEBP')
+        || header.subarray(0, 4).toString('ascii') === 'GIF8'
+        || header.subarray(0, 2).toString('ascii') === 'BM'
+        || header.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00]))
+        || header.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a]))
+        || (header.subarray(4, 8).toString('ascii') === 'ftyp'
+            && header.subarray(8, 12).toString('ascii').startsWith('avi'));
+}
+
+export function findPersistedScreenshotFiles(roots: readonly string[]): string[] {
     const files: string[] = [];
     const walk = (directory: string): void => {
+        let entries;
         try {
-            const entries = readdirSync(directory, { withFileTypes: true });
-            for (const entry of entries) {
-                const entryPath = path.join(directory, entry.name);
-                if (entry.isDirectory())
-                    walk(entryPath);
-                else if (/\.(png|jpe?g|webp)$/i.test(entry.name))
-                    files.push(entryPath);
-            }
+            entries = readdirSync(directory, { withFileTypes: true });
         } catch {
-            return;
+            throw new Error(`screenshot persistence scan failed: ${directory}`);
+        }
+        for (const entry of entries) {
+            const entryPath = path.join(directory, entry.name);
+            if (entry.isDirectory()) {
+                if (entry.name === '.git' || entry.name === 'node_modules')
+                    continue;
+                walk(entryPath);
+            } else if (entry.isFile() && isScreenshotSignature(entryPath)) {
+                files.push(entryPath);
+            }
         }
     };
-    walk(root);
+    for (const root of roots) {
+        try {
+            walk(root);
+        } catch (error) {
+            if (error instanceof Error && error.message.startsWith(
+                'screenshot persistence scan failed'
+            ))
+                throw error;
+            throw new Error(
+                `screenshot persistence scan failed: ${root}`,
+                { cause: error }
+            );
+        }
+    }
     return files.sort();
 }
 
@@ -298,9 +366,12 @@ export async function runElectronSmoke(
 ): Promise<ElectronSmokeResult> {
     const projectRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
     const userDataDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-electron-smoke-'));
+    const scratchDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-electron-scratch-'));
+    const workspaceImagesBefore = new Set(findPersistedScreenshotFiles([projectRoot]));
     const environment: NodeJS.ProcessEnv = {
         ...process.env,
-        DESKTOP_PET_SMOKE_SCENARIO: scenario
+        DESKTOP_PET_SMOKE_SCENARIO: scenario,
+        DESKTOP_PET_TEST_SCRATCH_DIR: scratchDir
     };
     if (scenario === nodeExposureScenario)
         environment.ELECTRON_RENDERER_URL = nodeExposureRendererUrl;
@@ -312,7 +383,10 @@ export async function runElectronSmoke(
     const observedProcessIds = new Set<number>();
     try {
         return await new Promise<ElectronSmokeResult>((resolve, reject) => {
-            const rendererArguments = scenario === 'live2d-real'
+            const rendererArguments = [
+                'full-flow',
+                'live2d-real'
+            ].includes(scenario)
                 ? [
                     '--use-gl=angle',
                     '--use-angle=swiftshader',
@@ -339,10 +413,20 @@ export async function runElectronSmoke(
             child.stderr.on('data', (chunk: string) => {
                 stderr += chunk;
             });
+            const failProcessSnapshot = (error: unknown): void => {
+                clearTimeout(timeout);
+                clearInterval(processSampler);
+                killElectronProcessTree(child);
+                reject(error instanceof Error ? error : new Error(String(error)));
+            };
             const processSampler = setInterval(() => {
-                if (child.pid !== undefined) {
-                    for (const processId of descendantProcessIds(child.pid))
-                        observedProcessIds.add(processId);
+                try {
+                    if (child.pid !== undefined) {
+                        for (const processId of descendantProcessIds(child.pid))
+                            observedProcessIds.add(processId);
+                    }
+                } catch (error) {
+                    failProcessSnapshot(error);
                 }
             }, 250);
 
@@ -379,12 +463,23 @@ export async function runElectronSmoke(
                     const leakedProcessIds = [...observedProcessIds]
                         .filter((processId) => running.has(processId))
                         .sort((left, right) => left - right);
+                    const workspaceImagesAfter = findPersistedScreenshotFiles(
+                        [projectRoot]
+                    );
+                    const persistedScreenshotFiles = [
+                        ...workspaceImagesAfter.filter(
+                            (filePath) => !workspaceImagesBefore.has(filePath)
+                        ),
+                        ...findPersistedScreenshotFiles([userDataDir, scratchDir])
+                    ];
                     resolve({
                         ...parsed,
                         ...(options.includeDiagnostics === true
                             ? {
                                 diagnostics: {
-                                    persistedScreenshotFiles: persistedScreenshotFiles(userDataDir),
+                                    persistedScreenshotFiles: [
+                                        ...new Set(persistedScreenshotFiles)
+                                    ].sort(),
                                     leakedProcessIds,
                                     stdout,
                                     stderr
@@ -399,5 +494,6 @@ export async function runElectronSmoke(
         });
     } finally {
         removeUserDataDir(userDataDir);
+        removeUserDataDir(scratchDir);
     }
 }

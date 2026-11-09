@@ -298,9 +298,13 @@ export class SelectionService {
         if (this.recordTranslation === undefined)
             return task;
         try {
-            await this.recordTranslation(task);
-            this.notifyMemoryStatus(memoryRecordedStatus());
-            return task;
+            const recordedTask = {
+                ...task,
+                memoryStatus: memoryRecordedStatus()
+            };
+            await this.recordTranslation(recordedTask);
+            this.notifyMemoryStatus(recordedTask.memoryStatus);
+            return recordedTask;
         } catch (error) {
             const status = memoryFailureStatus(error);
             this.notifyMemoryStatus(status);

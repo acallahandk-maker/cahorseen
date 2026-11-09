@@ -595,6 +595,10 @@ export const performanceIpcChannels = {
     changed: 'desktop-pet:performance-changed'
 } as const;
 
+export const resourcePressureIpcChannels = {
+    get: 'desktop-pet:resource-pressure-get'
+} as const;
+
 export const memoryIpcChannels = {
     queryHeat: 'desktop-pet:memory-query-heat',
     listEntries: 'desktop-pet:memory-list-entries',
@@ -766,6 +770,11 @@ export const performanceModeSchema = z.strictObject({
     path: ['frameRate']
 });
 
+export const resourcePressureMetricsSchema = z.strictObject({
+    privateBytes: z.number().int().nonnegative(),
+    basis: z.literal('electron-app-metrics-private-bytes')
+});
+
 export type ProviderSummary = z.infer<typeof providerSummarySchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
 export type ProviderSaveConfig = z.infer<typeof providerSaveConfigSchema>;
@@ -794,6 +803,7 @@ export type HeatStatistic = z.infer<typeof heatStatisticSchema>;
 export type PerformanceReason = z.infer<typeof performanceReasonSchema>;
 export type PerformanceFrameRate = z.infer<typeof performanceFrameRateSchema>;
 export type PerformanceMode = z.infer<typeof performanceModeSchema>;
+export type ResourcePressureMetrics = z.infer<typeof resourcePressureMetricsSchema>;
 export type SettingsPreferences = z.infer<typeof settingsPreferencesSchema>;
 export type SettingsState = z.infer<typeof settingsStateSchema>;
 
