@@ -13,7 +13,7 @@ import {
     registerIpcRouter
 } from '../../src/main/ipcRouter';
 
-const SYNTHETIC_API_KEY = 'sk-synthetic-test-only-123';
+const SYNTHETIC_API_KEY = 'placeholder-safe-credential';
 const temporaryDirectories: string[] = [];
 
 function fakeSafeStorage() {
@@ -33,7 +33,7 @@ function providerConfig(id: string) {
         id,
         name: 'Synthetic Provider',
         baseUrl: 'https://provider.example/v1',
-        apiKey: SYNTHETIC_API_KEY,
+        apiKey: 'placeholder-safe-credential',
         textModel: 'synthetic-text-model',
         visionModel: 'synthetic-vision-model',
         timeoutMs: 1_000

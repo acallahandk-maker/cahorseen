@@ -157,10 +157,10 @@ describe('SettingsWindow', () => {
             apiKey: expect.anything()
         }));
 
-        await user.type(screen.getByLabelText('API key'), 'sk-synthetic-replacement-123');
+        await user.type(screen.getByLabelText('API key'), 'placeholder-safe-credential');
         await user.click(screen.getByRole('button', { name: 'Save provider' }));
         expect(onSaveProvider).toHaveBeenLastCalledWith(expect.objectContaining({
-            apiKey: 'sk-synthetic-replacement-123'
+            apiKey: 'placeholder-safe-credential'
         }));
     });
 
@@ -230,13 +230,13 @@ describe('SettingsWindow', () => {
         await user.click(screen.getByRole('button', { name: 'Add provider' }));
         await user.type(screen.getByLabelText('Name'), 'Created Provider');
         await user.type(screen.getByLabelText('HTTPS Base URL'), 'https://created.example/v1');
-        await user.type(screen.getByLabelText('API key'), 'sk-synthetic-created-123');
+        await user.type(screen.getByLabelText('API key'), 'placeholder-safe-credential');
         await user.type(screen.getByLabelText('Text model'), 'created-text');
         await user.type(screen.getByLabelText('Vision model'), 'created-vision');
         await user.click(screen.getByRole('button', { name: 'Save provider' }));
         expect(onSaveProvider).toHaveBeenCalledWith(expect.objectContaining({
             name: 'Created Provider',
-            apiKey: 'sk-synthetic-created-123',
+            apiKey: 'placeholder-safe-credential',
             textModel: 'created-text',
             visionModel: 'created-vision'
         }));
@@ -646,7 +646,7 @@ describe('SettingsWindow', () => {
     });
 
     it('preserves typed codes when parsing IPC failures and masks stored secrets', () => {
-        expect(maskSecret('sk-synthetic-test-only-123')).toBe('••••••••');
+        expect(maskSecret('sk-synthetic-test-only')).toBe('••••••••');
         expect(maskSecret('')).toBe('Not set');
         expect(validateHotkey('Ctrl+Shift+T')).toEqual({
             valid: true,

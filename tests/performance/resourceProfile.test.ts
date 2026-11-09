@@ -9,6 +9,8 @@ import {
     it
 } from 'vitest';
 import {
+    calculateCpuPercent,
+    consumeInteractionLatencySample,
     evaluateAcceleratedIdleDrift,
     evaluatePerformanceProfile,
     resolveMascotResourceMode,
@@ -25,6 +27,17 @@ const measurement: PerformanceMeasurement = {
 };
 
 describe('performance profile release gate', () => {
+    it('measures only CPU deltas between established process samples', () => {
+        expect(calculateCpuPercent([
+            { elapsedMs: 0, cpuMicrosByProcessId: { 42: 500_000 } },
+            { elapsedMs: 1_000, cpuMicrosByProcessId: { 42: 600_000 } }
+        ])).toBe(10);
+        expect(calculateCpuPercent([
+            { elapsedMs: 0, cpuMicrosByProcessId: {} },
+            { elapsedMs: 1_000, cpuMicrosByProcessId: { 42: 500_000 } }
+        ])).toBe(0);
+    });
+
     it('accepts measurements within the product targets', () => {
         expect(evaluatePerformanceProfile(measurement)).toEqual({
             pass: true,
@@ -171,5 +184,34 @@ describe('mascot resource pressure', () => {
         expect(governor.observe(critical)).toBe('reduced');
         expect(governor.observe(critical)).toBe('reduced');
         expect(governor.observe(critical)).toBe('static');
+    });
+
+    it('selects static fallback for sustained peak private-memory pressure', () => {
+        const governor = new ResourcePressureGovernor();
+        const critical = {
+            privateBytes: 450 * 1024 * 1024,
+            interactionLatencyMs: 100
+        };
+
+        expect(governor.observe(critical)).toBe('reduced');
+        expect(governor.observe(critical)).toBe('reduced');
+        expect(governor.observe(critical)).toBe('static');
+    });
+
+    it('recovers after consuming a single high interaction-latency sample', () => {
+        const latencySample = { current: 250 };
+        const governor = new ResourcePressureGovernor();
+        const highLatency = consumeInteractionLatencySample(latencySample);
+
+        expect(highLatency).toBe(250);
+        expect(latencySample.current).toBe(0);
+        expect(governor.observe({
+            privateBytes: 280 * 1024 * 1024,
+            interactionLatencyMs: highLatency
+        })).toBe('reduced');
+        expect(governor.observe({
+            privateBytes: 280 * 1024 * 1024,
+            interactionLatencyMs: consumeInteractionLatencySample(latencySample)
+        })).toBe('full');
     });
 });

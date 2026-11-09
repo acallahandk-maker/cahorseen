@@ -45,7 +45,7 @@ const provider: ProviderConfig = {
     id: 'synthetic-provider',
     name: 'Synthetic',
     baseUrl: 'https://provider.invalid/v1',
-    apiKey: 'synthetic-key',
+    apiKey: 'placeholder-safe-credential',
     textModel: 'text-model',
     visionModel: 'vision-model',
     targetLanguage: 'zh-CN'

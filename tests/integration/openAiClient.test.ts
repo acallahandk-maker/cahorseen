@@ -10,12 +10,12 @@ import {
     type ProviderConfig
 } from '../../src/shared/contracts';
 
-const SYNTHETIC_API_KEY = 'sk-synthetic-test-only-123';
+const SYNTHETIC_API_KEY = 'placeholder-safe-credential';
 const provider: ProviderConfig = {
     id: 'synthetic-provider',
     name: 'Synthetic Provider',
     baseUrl: 'https://provider.example/v1',
-    apiKey: SYNTHETIC_API_KEY,
+    apiKey: 'placeholder-safe-credential',
     textModel: 'synthetic-text-model',
     visionModel: 'synthetic-vision-model',
     timeoutMs: 1_000
@@ -26,7 +26,7 @@ function jsonResponse(body: unknown, status = 200) {
         status,
         headers: {
             'content-type': 'application/json',
-            'x-api-key': SYNTHETIC_API_KEY
+            'x-api-key': 'placeholder-safe-credential'
         }
     });
 }

@@ -17,7 +17,7 @@ import {
 const provider: ProviderConfig = {
     name: 'Synthetic',
     baseUrl: 'https://provider.invalid/v1',
-    apiKey: 'synthetic-key',
+    apiKey: 'placeholder-safe-credential',
     textModel: 'text-model',
     visionModel: 'vision-model',
     targetLanguage: 'zh-CN'

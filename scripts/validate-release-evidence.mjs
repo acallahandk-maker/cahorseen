@@ -30,6 +30,12 @@ const IGNORED_DIRECTORIES = new Set([
     'node_modules',
     'out'
 ]);
+const SAFE_SECRET_VALUES = new Set([
+    'nonEmptyString',
+    'positiveInteger',
+    'sk-synthetic-test-only'
+]);
+const SAFE_SECRET_VALUE_PREFIXES = ['placeholder-'];
 const APPROVED_RUNTIME_LICENSES = new Set([
     'Apache-2.0',
     'BlueOak-1.0.0',
@@ -66,17 +72,22 @@ function scanFile(filePath, relativePath) {
     if (content.includes('\u0000'))
         return;
     for (const line of content.split(/\r?\n/)) {
-        if (
-            /(?:placeholder|synthetic|example|fixture|sample)/i.test(line)
-            || /\b(?:nonEmptyString|positiveInteger)\b/.test(line)
-        )
-            continue;
         for (const pattern of SECRET_PATTERNS) {
             pattern.lastIndex = 0;
-            if (pattern.test(line))
+            let match;
+            while ((match = pattern.exec(line)) !== null) {
+                const value = match[1] ?? match[0];
+                if (isSafeSecretValue(value))
+                    continue;
                 throw new Error(`Potential secret found in ${relativePath}; value not reported`);
+            }
         }
     }
+}
+
+function isSafeSecretValue(value) {
+    return SAFE_SECRET_VALUES.has(value)
+        || SAFE_SECRET_VALUE_PREFIXES.some((prefix) => value.startsWith(prefix));
 }
 
 export function scanSecrets(root) {

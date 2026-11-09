@@ -10,6 +10,7 @@ import {
     it
 } from 'vitest';
 import {
+    descendantProcessIdsFromRows,
     findPersistedScreenshotFiles,
     parseProcessRows
 } from './harness';
@@ -41,5 +42,20 @@ describe('electron cleanup diagnostics', () => {
             status: 0,
             stdout: ''
         }, 42)).toThrow(/process snapshot failed/i);
+        expect(() => parseProcessRows({
+            status: 0,
+            stdout: JSON.stringify([
+                { ProcessId: 7, ParentProcessId: 1 }
+            ])
+        }, undefined as unknown as number)).toThrow(/root process/i);
+        expect(() => parseProcessRows({
+            status: 0,
+            stdout: JSON.stringify([
+                { ProcessId: 7, ParentProcessId: 1 }
+            ])
+        }, 42)).toThrow(/root process/i);
+        expect(() => descendantProcessIdsFromRows([
+            { processId: 7, parentProcessId: 42 }
+        ], 42)).toThrow(/root process/i);
     });
 });

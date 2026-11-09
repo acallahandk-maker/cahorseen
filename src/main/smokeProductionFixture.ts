@@ -368,13 +368,13 @@ export async function runProductionFullFlow(
         const stage = document.querySelector('[data-testid="live2d-stage"]');
         const observed = [];
         const deadline = Date.now() + 12000;
-        for (let cycle = 0; cycle < 4 && Date.now() < deadline; cycle += 1) {
+        while (Date.now() < deadline) {
             const startedAt = performance.now();
             stage?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-            while (performance.now() - startedAt < 400) {
+            while (performance.now() - startedAt < 300) {
                 Math.sqrt(performance.now());
             }
-            await new Promise((resolve) => setTimeout(resolve, 1_100));
+            await new Promise((resolve) => setTimeout(resolve, 250));
             const metrics = await window.desktopPet.getResourcePressure();
             observed.push({
                 renderMode: stage?.getAttribute('data-render-mode') ?? 'missing',

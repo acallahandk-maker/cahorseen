@@ -31,12 +31,12 @@ import {
     type TranslationBubbleState
 } from '../../src/renderer/translation/translationState';
 
-const SYNTHETIC_API_KEY = 'synthetic-api-key-never-logged';
+const SYNTHETIC_API_KEY = 'placeholder-safe-credential';
 const provider: ProviderConfig = {
     id: 'synthetic-provider',
     name: 'Synthetic Provider',
     baseUrl: 'https://provider.example/v1',
-    apiKey: SYNTHETIC_API_KEY,
+    apiKey: 'placeholder-safe-credential',
     textModel: 'synthetic-text-model',
     visionModel: 'synthetic-vision-model',
     targetLanguage: 'zh-CN'

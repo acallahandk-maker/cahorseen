@@ -20,6 +20,11 @@ export interface PerformanceEvaluation {
     failures: string[];
 }
 
+export interface ProcessCpuSample {
+    elapsedMs: number;
+    cpuMicrosByProcessId: Readonly<Record<number, number>>;
+}
+
 export interface IdleDriftCycleModel {
     kind: 'idle-equivalent-local-maintenance';
     virtualHours: 8;
@@ -96,6 +101,28 @@ export function evaluatePerformanceProfile(
     };
 }
 
+export function calculateCpuPercent(
+    samples: readonly ProcessCpuSample[]
+): number {
+    if (samples.length < 2)
+        return 0;
+    let cpuMicros = 0;
+    let elapsedMs = 0;
+    for (let index = 1; index < samples.length; index += 1) {
+        const previous = samples[index - 1].cpuMicrosByProcessId;
+        for (const [processId, currentCpuMicros] of Object.entries(
+            samples[index].cpuMicrosByProcessId
+        )) {
+            const previousCpuMicros = previous[Number(processId)];
+            if (previousCpuMicros === undefined)
+                continue;
+            cpuMicros += Math.max(0, currentCpuMicros - previousCpuMicros);
+        }
+        elapsedMs += samples[index].elapsedMs - samples[index - 1].elapsedMs;
+    }
+    return elapsedMs <= 0 ? 0 : cpuMicros / 1_000 / elapsedMs * 100;
+}
+
 export function evaluateAcceleratedIdleDrift(options: {
     startPrivateBytes: number;
     samples: readonly number[];
@@ -147,8 +174,7 @@ export function resolveMascotResourceMode(
     input: ResourcePressureInput
 ): MascotResourceMode {
     const sustainedPressureSamples = input.sustainedPressureSamples ?? 0;
-    const criticalPressure =
-        input.interactionLatencyMs >= PERFORMANCE_TARGETS.interactionLatencyMs;
+    const criticalPressure = isCriticalResourcePressure(input);
     if (criticalPressure && sustainedPressureSamples >= 3)
         return 'static';
     const reducedPressure = input.privateBytes >= PERFORMANCE_TARGETS.normalPrivateBytes
@@ -162,8 +188,7 @@ export class ResourcePressureGovernor {
     observe(
         input: Omit<ResourcePressureInput, 'sustainedPressureSamples'>
     ): MascotResourceMode {
-        const criticalPressure =
-            input.interactionLatencyMs >= PERFORMANCE_TARGETS.interactionLatencyMs;
+        const criticalPressure = isCriticalResourcePressure(input);
         this.sustainedPressureSamples = criticalPressure
             ? Math.min(this.sustainedPressureSamples + 1, 3)
             : 0;
@@ -172,4 +197,19 @@ export class ResourcePressureGovernor {
             sustainedPressureSamples: this.sustainedPressureSamples
         });
     }
+}
+
+function isCriticalResourcePressure(
+    input: Omit<ResourcePressureInput, 'sustainedPressureSamples'>
+): boolean {
+    return input.interactionLatencyMs >= PERFORMANCE_TARGETS.interactionLatencyMs
+        || input.privateBytes >= PERFORMANCE_TARGETS.peakPrivateBytes;
+}
+
+export function consumeInteractionLatencySample(
+    sample: { current: number }
+): number {
+    const interactionLatencyMs = sample.current;
+    sample.current = 0;
+    return interactionLatencyMs;
 }

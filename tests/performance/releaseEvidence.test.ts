@@ -34,6 +34,35 @@ describe('release evidence validation', () => {
         }
     });
 
+    it('rejects real-looking secrets even when generic fixture prose is adjacent', () => {
+        const root = temporaryDirectory('secret-prose');
+        const secretValue = ['AKIA', 'EXAMPLE', 'FIXTURE', '01'].join('');
+        writeFileSync(
+            path.join(root, '.env'),
+            `API_KEY=${secretValue} example fixture sample`
+        );
+
+        expect(() => scanSecrets(root)).toThrow(/potential secret/i);
+        try {
+            scanSecrets(root);
+        } catch (error) {
+            expect(String(error)).not.toContain(secretValue);
+        }
+    });
+
+    it('allows only explicit safe placeholder values', () => {
+        const root = temporaryDirectory('secret-placeholder');
+        writeFileSync(
+            path.join(root, '.env'),
+            [
+                'API_KEY=placeholder-safe-credential',
+                'TEST_API_KEY=sk-synthetic-test-only'
+            ].join('\n')
+        );
+
+        expect(scanSecrets(root)).toBe(true);
+    });
+
     it('enforces approved dependency licenses and checklist counts', () => {
         const root = temporaryDirectory('license-policy');
         const queryPath = path.join(root, 'query.json');

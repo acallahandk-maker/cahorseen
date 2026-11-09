@@ -208,7 +208,7 @@ describe('TranslationBubble', () => {
             id: 'production-provider',
             name: 'Production Provider',
             baseUrl: 'https://provider.example/v1',
-            apiKey: 'sk-synthetic-test-only-123',
+            apiKey: 'placeholder-safe-credential',
             textModel: 'production-text-model',
             visionModel: 'production-vision-model',
             targetLanguage: 'zh-CN'

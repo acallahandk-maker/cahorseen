@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+    calculateCpuPercent,
     evaluateAcceleratedIdleDrift,
     evaluatePerformanceProfile,
     PERFORMANCE_TARGETS
@@ -75,23 +76,6 @@ function treeSnapshot(rootPid) {
         ),
         processIds: selected.map((row) => row.processId)
     };
-}
-
-function cpuPercent(samples) {
-    if (samples.length < 2)
-        return 0;
-    let cpuMicros = 0;
-    let elapsedMs = 0;
-    for (let index = 1; index < samples.length; index += 1) {
-        const previous = samples[index - 1].cpuMicrosByProcessId;
-        for (const [processId, currentCpuMicros] of Object.entries(
-            samples[index].cpuMicrosByProcessId
-        )) {
-            cpuMicros += Math.max(0, currentCpuMicros - (previous[processId] ?? 0));
-        }
-        elapsedMs += samples[index].elapsedMs - samples[index - 1].elapsedMs;
-    }
-    return elapsedMs <= 0 ? 0 : cpuMicros / 1000 / elapsedMs * 100;
 }
 
 function parseRealIdleHours(args) {
@@ -191,7 +175,7 @@ async function runProfile() {
     ));
     if (stableIdleSamples.length < 2)
         throw new Error('Performance harness did not collect a distinct idle interval');
-    const idleCpuPercent = cpuPercent(stableIdleSamples);
+    const idleCpuPercent = calculateCpuPercent(stableIdleSamples);
     const measurement = {
         idleCpuPercent,
         activeCpuPercent: Number(resourceProfile.activeCpuPercent ?? 0),

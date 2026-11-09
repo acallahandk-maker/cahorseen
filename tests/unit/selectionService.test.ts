@@ -15,7 +15,7 @@ const provider: ProviderConfig = {
     id: 'synthetic-provider',
     name: 'Synthetic Provider',
     baseUrl: 'https://provider.example/v1',
-    apiKey: 'synthetic-api-key',
+    apiKey: 'placeholder-safe-credential',
     textModel: 'synthetic-text-model',
     visionModel: 'synthetic-vision-model',
     targetLanguage: 'zh-CN'

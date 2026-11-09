@@ -5,7 +5,8 @@ import {
     openSync,
     readSync,
     readdirSync,
-    rmSync
+    rmSync,
+    writeFileSync
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,7 @@ const electronPath = createRequire(import.meta.url)('electron') as string;
 type ElectronSmokeProcess = ChildProcessByStdio<null, Readable, Readable>;
 const nodeExposureScenario = 'app-smoke-node-exposure';
 const nodeExposureRendererUrl = 'data:text/html,<script>window.require = {}; window.process = {};</script>';
+const smokeCompletionMarker = 'DESKTOP_PET_SMOKE_COMPLETE';
 
 export interface Live2DSmokeDiagnostic {
     licenseNoticePresent: boolean;
@@ -221,9 +223,14 @@ export interface ProcessSnapshotResult {
 
 export function parseProcessRows(
     result: ProcessSnapshotResult,
-    rootPid?: number
+    rootPid: number
 ): Array<{ processId: number; parentProcessId: number }> {
-    if (result.status !== 0 || result.stdout.trim() === '')
+    if (!Number.isInteger(rootPid) || rootPid <= 0)
+        throw new Error('process snapshot root process is required');
+    if (
+        result.status !== 0
+        || result.stdout.trim() === ''
+    )
         throw new Error('process snapshot failed');
     let parsed: unknown;
     try {
@@ -247,14 +254,16 @@ export function parseProcessRows(
             parentProcessId: (row as { ParentProcessId: number }).ParentProcessId
         };
     });
-    if (rootPid !== undefined && !processRows.some((row) => row.processId === rootPid))
-        throw new Error('process snapshot failed');
+    if (!processRows.some((row) => row.processId === rootPid))
+        throw new Error('process snapshot root process is missing');
     return processRows;
 }
 
-function processTreeSnapshot(): Array<{ processId: number; parentProcessId: number }> {
+function processTreeSnapshot(
+    rootPid: number
+): Array<{ processId: number; parentProcessId: number }> {
     if (process.platform !== 'win32')
-        return [];
+        throw new Error('process snapshot failed');
     const result = spawnSync('powershell.exe', [
         '-NoProfile',
         '-Command',
@@ -264,11 +273,19 @@ function processTreeSnapshot(): Array<{ processId: number; parentProcessId: numb
         stdio: ['ignore', 'pipe', 'ignore'],
         windowsHide: true
     });
-    return parseProcessRows(result);
+    return parseProcessRows(result, rootPid);
 }
 
-function descendantProcessIds(rootPid: number): number[] {
-    const rows = processTreeSnapshot();
+export function descendantProcessIdsFromRows(
+    rows: readonly { processId: number; parentProcessId: number }[],
+    rootPid: number
+): number[] {
+    if (
+        !Number.isInteger(rootPid)
+        || rootPid <= 0
+        || !rows.some((row) => row.processId === rootPid)
+    )
+        throw new Error('process snapshot root process is missing');
     const children = new Map<number, number[]>();
     for (const row of rows) {
         const siblings = children.get(row.parentProcessId) ?? [];
@@ -293,8 +310,12 @@ function descendantProcessIds(rootPid: number): number[] {
     return descendants;
 }
 
+function descendantProcessIds(rootPid: number): number[] {
+    return descendantProcessIdsFromRows(processTreeSnapshot(rootPid), rootPid);
+}
+
 function runningProcessIds(): Set<number> {
-    return new Set(processTreeSnapshot().map((row) => row.processId));
+    return new Set(processTreeSnapshot(process.pid).map((row) => row.processId));
 }
 
 function isScreenshotSignature(filePath: string): boolean {
@@ -367,10 +388,12 @@ export async function runElectronSmoke(
     const projectRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
     const userDataDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-electron-smoke-'));
     const scratchDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-electron-scratch-'));
+    const shutdownAckPath = path.join(scratchDir, 'shutdown-ack');
     const workspaceImagesBefore = new Set(findPersistedScreenshotFiles([projectRoot]));
     const environment: NodeJS.ProcessEnv = {
         ...process.env,
         DESKTOP_PET_SMOKE_SCENARIO: scenario,
+        DESKTOP_PET_SMOKE_SHUTDOWN_ACK: '1',
         DESKTOP_PET_TEST_SCRATCH_DIR: scratchDir
     };
     if (scenario === nodeExposureScenario)
@@ -380,6 +403,7 @@ export async function runElectronSmoke(
 
     let stdout = '';
     let stderr = '';
+    let shutdownObserved = false;
     const observedProcessIds = new Set<number>();
     try {
         return await new Promise<ElectronSmokeResult>((resolve, reject) => {
@@ -409,6 +433,10 @@ export async function runElectronSmoke(
             child.stderr.setEncoding('utf8');
             child.stdout.on('data', (chunk: string) => {
                 stdout += chunk;
+                if (stdout.includes(smokeCompletionMarker)) {
+                    shutdownObserved = true;
+                    writeFileSync(shutdownAckPath, '');
+                }
             });
             child.stderr.on('data', (chunk: string) => {
                 stderr += chunk;
@@ -420,6 +448,8 @@ export async function runElectronSmoke(
                 reject(error instanceof Error ? error : new Error(String(error)));
             };
             const processSampler = setInterval(() => {
+                if (shutdownObserved || child.exitCode !== null)
+                    return;
                 try {
                     if (child.pid !== undefined) {
                         for (const processId of descendantProcessIds(child.pid))
@@ -429,6 +459,10 @@ export async function runElectronSmoke(
                     failProcessSnapshot(error);
                 }
             }, 250);
+            child.once('exit', () => {
+                shutdownObserved = true;
+                clearInterval(processSampler);
+            });
 
             const timeout = setTimeout(() => {
                 clearInterval(processSampler);

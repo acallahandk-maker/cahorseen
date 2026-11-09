@@ -13,6 +13,7 @@ import {
     type PerformanceContext
 } from '../../main/services/performanceGovernor';
 import {
+    consumeInteractionLatencySample,
     ResourcePressureGovernor,
     type MascotResourceMode
 } from '../../shared/performanceProfile';
@@ -889,10 +890,12 @@ export default function Live2DStage({
             const getResourcePressure = desktopPet?.getResourcePressure;
             if (typeof getResourcePressure !== 'function')
                 return;
+            const interactionLatencyMs =
+                consumeInteractionLatencySample(interactionLatencyRef);
             void getResourcePressure().then((metrics: { privateBytes: number }) => {
                 setResourceMode(pressureGovernorRef.current.observe({
                     privateBytes: metrics.privateBytes,
-                    interactionLatencyMs: interactionLatencyRef.current
+                    interactionLatencyMs
                 }));
             }).catch(() => undefined);
         };

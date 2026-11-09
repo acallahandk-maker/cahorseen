@@ -3,6 +3,8 @@ import {
     BrowserWindow,
     type BrowserWindow as BrowserWindowType
 } from 'electron';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import {
     createProductionSmokeFixture,
     runProductionFullFlow,
@@ -29,13 +31,32 @@ interface SmokeResult {
 }
 
 let settled = false;
+const smokeCompletionMarker = 'DESKTOP_PET_SMOKE_COMPLETE';
+
+function exitAfterShutdownAck(exitCode: number): void {
+    const scratchDir = process.env.DESKTOP_PET_TEST_SCRATCH_DIR;
+    if (
+        scratchDir === undefined
+        || process.env.DESKTOP_PET_SMOKE_SHUTDOWN_ACK !== '1'
+    ) {
+        app.exit(exitCode);
+        return;
+    }
+    const ackPath = path.join(scratchDir, 'shutdown-ack');
+    const interval = setInterval(() => {
+        if (!existsSync(ackPath))
+            return;
+        clearInterval(interval);
+        app.exit(exitCode);
+    }, 10);
+}
 
 function exitWithMarker(result: SmokeResult): void {
     if (settled)
         return;
     settled = true;
-    process.stdout.write(`${JSON.stringify(result)}\n`, () => {
-        app.exit(0);
+    process.stdout.write(`${smokeCompletionMarker}\n${JSON.stringify(result)}\n`, () => {
+        exitAfterShutdownAck(0);
     });
 }
 
@@ -44,8 +65,10 @@ function exitWithError(error: unknown): void {
         return;
     settled = true;
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
-    process.stderr.write(`${message}\n`, () => {
-        app.exit(1);
+    process.stdout.write(`${smokeCompletionMarker}\n`, () => {
+        process.stderr.write(`${message}\n`, () => {
+            exitAfterShutdownAck(1);
+        });
     });
 }
 
