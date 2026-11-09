@@ -12,6 +12,10 @@ import {
     shouldPauseLoop,
     type PerformanceContext
 } from '../../main/services/performanceGovernor';
+import {
+    ResourcePressureGovernor,
+    type MascotResourceMode
+} from '../../shared/performanceProfile';
 
 interface MascotCoreModel {
     setParameterValueById(parameterId: string, value: number): void;
@@ -793,9 +797,12 @@ export default function Live2DStage({
     const containerRef = useRef<HTMLDivElement>(null);
     const appRef = useRef<Application | undefined>(undefined);
     const modelHandleRef = useRef<MascotHandle | undefined>(undefined);
+    const pressureGovernorRef = useRef(new ResourcePressureGovernor());
+    const interactionLatencyRef = useRef(0);
     const [renderMode, setRenderMode] = useState<'live2d' | 'static-fallback'>(
         'static-fallback'
     );
+    const [resourceMode, setResourceMode] = useState<MascotResourceMode>('full');
 
     useEffect(() => {
         let disposed = false;
@@ -864,9 +871,56 @@ export default function Live2DStage({
 
     useEffect(() => {
         const handle = modelHandleRef.current;
-        if (handle !== undefined)
-            void setMascotState(handle, state);
+        if (handle !== undefined) {
+            const startedAt = window.performance.now();
+            void setMascotState(handle, state).finally(() => {
+                interactionLatencyRef.current = window.performance.now() - startedAt;
+            });
+        }
     }, [renderMode, state]);
+
+    useEffect(() => {
+        const samplePressure = (): void => {
+            const memory = (window.performance as Performance & {
+                memory?: { usedJSHeapSize?: number };
+            }).memory;
+            setResourceMode(pressureGovernorRef.current.observe({
+                privateBytes: memory?.usedJSHeapSize ?? 0,
+                interactionLatencyMs: interactionLatencyRef.current
+            }));
+            interactionLatencyRef.current = 0;
+        };
+        samplePressure();
+        const interval = window.setInterval(samplePressure, 1_000);
+        return () => window.clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        const handle = modelHandleRef.current;
+        const app = appRef.current;
+        if (handle === undefined || app === undefined)
+            return;
+        if (resourceMode === 'reduced') {
+            const model = getMascotModel(handle);
+            if (model !== undefined) {
+                model.autoInteract = false;
+                model.interactive = false;
+            }
+            configureFrameTicker(app.ticker, { reason: 'idle' });
+            return;
+        }
+        if (resourceMode !== 'static')
+            return;
+        disposeMascotModel(handle);
+        modelHandleRef.current = undefined;
+        app.destroy(true, {
+            children: false,
+            texture: true,
+            baseTexture: true
+        });
+        appRef.current = undefined;
+        setRenderMode('static-fallback');
+    }, [renderMode, resourceMode]);
 
     useEffect(() => {
         const ticker = appRef.current?.ticker;
@@ -882,6 +936,7 @@ export default function Live2DStage({
         <div
             aria-label="Live2D mascot stage"
             data-render-mode={renderMode}
+            data-resource-mode={resourceMode}
             data-testid="live2d-stage"
             ref={containerRef}
             style={{

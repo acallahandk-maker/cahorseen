@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcessByStdio } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -46,9 +46,22 @@ export interface ElectronSmokeResult {
         processIsUndefined: boolean;
         mascotRenderMode?: string;
         live2D?: Live2DSmokeDiagnostic;
+        fullFlow?: unknown;
     };
     windowCount: number;
     url: string;
+    diagnostics?: ElectronSmokeDiagnostics;
+}
+
+export interface ElectronSmokeDiagnostics {
+    persistedScreenshotFiles: string[];
+    leakedProcessIds: number[];
+    stdout: string;
+    stderr: string;
+}
+
+export interface ElectronSmokeOptions {
+    includeDiagnostics?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -164,7 +177,10 @@ function parseSmokeResult(marker: string, expectedScenario: string): ElectronSmo
             ...(typeof value.payload.mascotRenderMode === 'string'
                 ? { mascotRenderMode: value.payload.mascotRenderMode }
                 : {}),
-            ...(live2D === undefined ? {} : { live2D })
+            ...(live2D === undefined ? {} : { live2D }),
+            ...(value.payload.fullFlow === undefined
+                ? {}
+                : { fullFlow: value.payload.fullFlow })
         },
         windowCount: value.windowCount,
         url: value.url
@@ -191,7 +207,95 @@ function killElectronProcessTree(child: ElectronSmokeProcess): void {
     child.kill();
 }
 
-export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeResult> {
+function processTreeSnapshot(): Array<{ processId: number; parentProcessId: number }> {
+    if (process.platform !== 'win32')
+        return [];
+    const result = spawnSync('powershell.exe', [
+        '-NoProfile',
+        '-Command',
+        'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'
+    ], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true
+    });
+    if (result.status !== 0 || result.stdout.trim() === '')
+        return [];
+    try {
+        const parsed: unknown = JSON.parse(result.stdout);
+        const rows = Array.isArray(parsed) ? parsed : [parsed];
+        return rows.flatMap((row) => {
+            if (
+                typeof row !== 'object'
+                || row === null
+                || typeof (row as { ProcessId?: unknown }).ProcessId !== 'number'
+                || typeof (row as { ParentProcessId?: unknown }).ParentProcessId !== 'number'
+            )
+                return [];
+            return [{
+                processId: (row as { ProcessId: number }).ProcessId,
+                parentProcessId: (row as { ParentProcessId: number }).ParentProcessId
+            }];
+        });
+    } catch {
+        return [];
+    }
+}
+
+function descendantProcessIds(rootPid: number): number[] {
+    const rows = processTreeSnapshot();
+    const children = new Map<number, number[]>();
+    for (const row of rows) {
+        const siblings = children.get(row.parentProcessId) ?? [];
+        siblings.push(row.processId);
+        children.set(row.parentProcessId, siblings);
+    }
+    const descendants: number[] = [];
+    const queue = [rootPid];
+    const seen = new Set<number>([rootPid]);
+    while (queue.length > 0) {
+        const parentId = queue.shift();
+        if (parentId === undefined)
+            continue;
+        for (const childId of children.get(parentId) ?? []) {
+            if (seen.has(childId))
+                continue;
+            seen.add(childId);
+            descendants.push(childId);
+            queue.push(childId);
+        }
+    }
+    return descendants;
+}
+
+function runningProcessIds(): Set<number> {
+    return new Set(processTreeSnapshot().map((row) => row.processId));
+}
+
+function persistedScreenshotFiles(root: string): string[] {
+    const files: string[] = [];
+    const walk = (directory: string): void => {
+        try {
+            const entries = readdirSync(directory, { withFileTypes: true });
+            for (const entry of entries) {
+                const entryPath = path.join(directory, entry.name);
+                if (entry.isDirectory())
+                    walk(entryPath);
+                else if (/\.(png|jpe?g|webp)$/i.test(entry.name))
+                    files.push(entryPath);
+            }
+        } catch {
+            return;
+        }
+    };
+    walk(root);
+    return files.sort();
+}
+
+export async function runElectronSmoke(
+    scenario: string,
+    options: ElectronSmokeOptions = {}
+): Promise<ElectronSmokeResult> {
     const projectRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
     const userDataDir = mkdtempSync(path.join(tmpdir(), 'desktop-pet-electron-smoke-'));
     const environment: NodeJS.ProcessEnv = {
@@ -203,6 +307,9 @@ export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeR
     else
         delete environment.ELECTRON_RENDERER_URL;
 
+    let stdout = '';
+    let stderr = '';
+    const observedProcessIds = new Set<number>();
     try {
         return await new Promise<ElectronSmokeResult>((resolve, reject) => {
             const rendererArguments = scenario === 'live2d-real'
@@ -224,8 +331,6 @@ export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeR
                 windowsHide: true
             }) as ElectronSmokeProcess;
 
-            let stdout = '';
-            let stderr = '';
             child.stdout.setEncoding('utf8');
             child.stderr.setEncoding('utf8');
             child.stdout.on('data', (chunk: string) => {
@@ -234,18 +339,27 @@ export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeR
             child.stderr.on('data', (chunk: string) => {
                 stderr += chunk;
             });
+            const processSampler = setInterval(() => {
+                if (child.pid !== undefined) {
+                    for (const processId of descendantProcessIds(child.pid))
+                        observedProcessIds.add(processId);
+                }
+            }, 250);
 
             const timeout = setTimeout(() => {
+                clearInterval(processSampler);
                 killElectronProcessTree(child);
                 reject(new Error(`Electron smoke timed out for scenario ${scenario}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
             }, 15_000);
 
             child.once('error', (error) => {
                 clearTimeout(timeout);
+                clearInterval(processSampler);
                 reject(error);
             });
             child.once('close', (code) => {
                 clearTimeout(timeout);
+                clearInterval(processSampler);
                 if (code !== 0) {
                     reject(new Error(`Electron smoke exited with code ${String(code)}\n${stderr}`));
                     return;
@@ -260,7 +374,24 @@ export async function runElectronSmoke(scenario: string): Promise<ElectronSmokeR
                 }
 
                 try {
-                    resolve(parseSmokeResult(markers[0], scenario));
+                    const parsed = parseSmokeResult(markers[0], scenario);
+                    const running = runningProcessIds();
+                    const leakedProcessIds = [...observedProcessIds]
+                        .filter((processId) => running.has(processId))
+                        .sort((left, right) => left - right);
+                    resolve({
+                        ...parsed,
+                        ...(options.includeDiagnostics === true
+                            ? {
+                                diagnostics: {
+                                    persistedScreenshotFiles: persistedScreenshotFiles(userDataDir),
+                                    leakedProcessIds,
+                                    stdout,
+                                    stderr
+                                }
+                            }
+                            : {})
+                    });
                 } catch (error) {
                     reject(error instanceof Error ? error : new Error(String(error)));
                 }

@@ -2,6 +2,8 @@
 
 No third-party Cubism or Live2D model binary is committed to Git. The deterministic provisioning step in `scripts/provision-live2d-assets.mjs` downloads official archives into `node_modules/.cache/desktop-pet-translator/live2d`, verifies every locked checksum, extracts only the required files, and writes ignored build resources under `src/renderer/public/live2d/`. `npm run build`, `npm run dev`, and therefore `npm test` run this step automatically. Vite copies the verified resources into `out/renderer/live2d`, so the packaged renderer contains the real Core and model locally without embedding a remote runtime dependency.
 
+This project, including builds containing the verified Live2D materials, is restricted to personal-only use. Distribution, commercial use, or other use requires explicit written permission from the project owner in addition to satisfying every upstream license condition recorded below.
+
 ## Cubism Core
 
 - Official source: `https://cubism.live2d.com/sdk-web/bin/CubismSdkForWeb-4-r.7.zip`

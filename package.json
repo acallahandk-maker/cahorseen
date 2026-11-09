@@ -4,18 +4,55 @@
   "private": true,
   "description": "Windows desktop pet translator",
   "main": "out/main/index.js",
+  "license": "UNLICENSED",
   "engines": {
     "node": ">=22.12.0"
   },
   "scripts": {
     "build": "electron-vite build",
+    "build:windows": "npm run build && electron-builder --win --x64",
     "dev": "electron-vite dev",
     "lint": "eslint .",
     "prebuild": "node scripts/provision-live2d-assets.mjs",
     "predev": "node scripts/provision-live2d-assets.mjs",
+    "profile:performance": "npm run build && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/profile-performance.mjs",
     "start": "electron-vite preview",
     "test": "npm run build && node scripts/run-tests.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "validate:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-release.ps1"
+  },
+  "build": {
+    "appId": "com.openai.desktop-pet-translator",
+    "productName": "Desktop Pet Translator",
+    "npmRebuild": false,
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "buildResources": "config/electron-builder",
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Desktop-Pet-Translator-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "oneClick": false
+    }
   },
   "dependencies": {
     "@pixi/unsafe-eval": "^5.3.12",
@@ -38,6 +75,7 @@
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
     "electron": "44.10.0",
+    "electron-builder": "26.18.0",
     "electron-vite": "6.0.0",
     "eslint": "10.13.0",
     "globals": "17.13.0",
