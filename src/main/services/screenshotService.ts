@@ -15,10 +15,6 @@ import {
     type TranslationTask
 } from '../../shared/contracts';
 import {
-    VocabularyTextValidationError,
-    validateVocabularySourceText
-} from '../../shared/vocabularyText';
-import {
     ProviderError,
     providerErrorMessage
 } from './openAiClient';
@@ -28,9 +24,8 @@ import {
     type ImageTranslationRunner,
     type ImageTranslationRunnerRequest
 } from '../workers/translationWorker';
-import { getActiveProviderConfig } from './secureConfig';
+import { getActiveProviderConfig, getSettings } from './secureConfig';
 import {
-    MemoryDatabaseError,
     memoryFailureStatus,
     memoryRecordedStatus,
     recordTranslation as recordTranslationMemory
@@ -78,6 +73,7 @@ export interface ScreenshotServiceOptions {
     createId?: () => string;
     recordTranslation?: (task: TranslationTask) => Promise<void>;
     onMemoryStatus?: (status: MemoryPersistenceStatus) => void;
+    isTranslationHistoryEnabled?: () => boolean | Promise<boolean>;
 }
 
 export interface ScreenshotTranslationOptions {
@@ -324,6 +320,7 @@ export class ScreenshotService {
     private readonly createId: () => string;
     private readonly recordTranslation: ((task: TranslationTask) => Promise<void>) | undefined;
     private readonly onMemoryStatus: ((status: MemoryPersistenceStatus) => void) | undefined;
+    private readonly isTranslationHistoryEnabled: () => boolean | Promise<boolean>;
     private readonly captures = new Set<CapturedImage>();
     private captureQueue: Promise<void> = Promise.resolve();
 
@@ -348,6 +345,7 @@ export class ScreenshotService {
         this.createId = options.createId ?? randomUUID;
         this.recordTranslation = options.recordTranslation;
         this.onMemoryStatus = options.onMemoryStatus;
+        this.isTranslationHistoryEnabled = options.isTranslationHistoryEnabled ?? (() => true);
     }
 
     activeCaptureCount(): number {
@@ -497,6 +495,14 @@ export class ScreenshotService {
                 throw new ProviderError('invalid-config');
             targetLanguage = requestedLanguage;
             image = await this.captureRegion(bounds, options.signal);
+            let historyEnabled = false;
+            if (this.recordTranslation !== undefined) {
+                try {
+                    historyEnabled = await this.isTranslationHistoryEnabled();
+                } catch {
+                    historyEnabled = false;
+                }
+            }
             const request: ImageTranslationRunnerRequest = {
                 kind: 'image',
                 taskId,
@@ -504,7 +510,7 @@ export class ScreenshotService {
                 image,
                 context: options.context,
                 targetLanguage,
-                structuredResponse: this.recordTranslation !== undefined
+                structuredResponse: historyEnabled
             };
             const result = await this.translationRunner.runImage(request, options.signal);
             return this.persistCompletedTask({
@@ -526,7 +532,7 @@ export class ScreenshotService {
                 textModel: provider.textModel,
                 visionModel: provider.visionModel,
                 translationModel: result.model
-            }, result.sourceText);
+            }, result.sourceText, historyEnabled);
         } catch (error) {
             return {
                 id: taskId,
@@ -559,32 +565,20 @@ export class ScreenshotService {
 
     private async persistCompletedTask(
         task: TranslationTask,
-        memorySourceText?: string
+        memorySourceText: string | undefined,
+        historyEnabled: boolean
     ): Promise<TranslationTask> {
-        if (this.recordTranslation === undefined)
+        if (this.recordTranslation === undefined || !historyEnabled)
             return task;
         let taskToRecord = task;
         if (task.kind === 'screenshot') {
-            let sourceText: string;
-            try {
-                sourceText = validateVocabularySourceText(memorySourceText ?? '');
-            } catch (error) {
-                const reason = error instanceof VocabularyTextValidationError
-                    ? ` (${error.reason})`
-                    : '';
-                const status = memoryFailureStatus(new MemoryDatabaseError(
-                    'invalid-request',
-                    `Screenshot memory requires useful source text${reason}.`
-                ));
-                this.notifyMemoryStatus(status);
-                return { ...task, memoryStatus: status };
-            }
-            taskToRecord = { ...task, sourceText };
+            taskToRecord = { ...task, sourceText: memorySourceText ?? '' };
         }
         try {
-            await this.recordTranslation(taskToRecord);
-            this.notifyMemoryStatus(memoryRecordedStatus());
-            return task;
+            const status = memoryRecordedStatus();
+            await this.recordTranslation({ ...taskToRecord, memoryStatus: status });
+            this.notifyMemoryStatus(status);
+            return { ...task, memoryStatus: status };
         } catch (error) {
             const status = memoryFailureStatus(error);
             this.notifyMemoryStatus(status);
@@ -690,7 +684,14 @@ async function getDefaultService(): Promise<ScreenshotService> {
             mapBoundsToCapturePixels: (_displayIndex, bounds) => (
                 screen.dipToScreenRect(null, bounds)
             ),
-            recordTranslation: recordTranslationMemory
+            recordTranslation: recordTranslationMemory,
+            isTranslationHistoryEnabled: async () => {
+                try {
+                    return (await getSettings()).preferences.privacy.saveTranslationHistory;
+                } catch {
+                    return false;
+                }
+            }
         });
     }
     return defaultService;

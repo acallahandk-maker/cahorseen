@@ -1,5 +1,6 @@
 import {
     quizPreferencesPatchSchema,
+    quizPreferencesSchema,
     quizQuestionSchema,
     type MemoryEntry,
     type MemoryEntryQuery,
@@ -50,6 +51,8 @@ export interface QuizSchedulerOptions {
     now?: () => Date;
     canStartQuiz?: () => boolean;
     canAnswerQuiz?: () => boolean;
+    initialPreferences?: QuizPreferences;
+    persistPreferences?: (preferences: QuizPreferences) => Promise<void>;
 }
 
 interface PendingQuestion {
@@ -62,6 +65,7 @@ export class QuizScheduler {
     private readonly now: () => Date;
     private readonly canStartQuiz: () => boolean;
     private readonly canAnswerQuiz: () => boolean;
+    private readonly persistPreferences: ((preferences: QuizPreferences) => Promise<void>) | undefined;
     private preferences: QuizPreferences = DEFAULT_PREFERENCES;
     private readonly pendingQuestions = new Map<string, PendingQuestion>();
 
@@ -70,6 +74,9 @@ export class QuizScheduler {
         this.now = options.now ?? (() => new Date());
         this.canStartQuiz = options.canStartQuiz ?? (() => true);
         this.canAnswerQuiz = options.canAnswerQuiz ?? (() => true);
+        this.persistPreferences = options.persistPreferences;
+        if (options.initialPreferences !== undefined)
+            this.applyPersistedPreferences(options.initialPreferences);
     }
 
     async selectQuizQuestions(count = 1): Promise<QuizQuestion[]> {
@@ -163,6 +170,13 @@ export class QuizScheduler {
             frequencyWeights: parsed.frequencyWeights
                 ?? this.preferences.frequencyWeights
         };
+        if (this.preferences.paused)
+            this.pendingQuestions.clear();
+        await this.persistPreferences?.(this.preferences);
+    }
+
+    applyPersistedPreferences(preferences: QuizPreferences): void {
+        this.preferences = quizPreferencesSchema.parse(preferences);
         if (this.preferences.paused)
             this.pendingQuestions.clear();
     }

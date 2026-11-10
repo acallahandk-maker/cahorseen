@@ -7,6 +7,7 @@ import {
     nativeImage,
     powerMonitor,
     screen,
+    shell,
     Tray,
     type MenuItemConstructorOptions,
     type NativeImage
@@ -62,12 +63,24 @@ import { QuizScheduler } from './services/quizScheduler';
 import { getElectronResourcePressureMetrics } from './services/resourceMetrics';
 import {
     configurePerformanceWindowEvents,
-    createWindowsFullscreenProbe,
     SystemIntegration,
     type TrayLike
 } from './systemIntegration';
 
 const pingChannel = 'desktop-pet:ping';
+const DEFAULT_RELEASES_URL = 'https://github.com/openai/desktop-pet-translator/releases';
+
+function openConfiguredReleasesPage(): void {
+    let releasesUrl = DEFAULT_RELEASES_URL;
+    try {
+        const configured = new URL(process.env.DESKTOP_PET_RELEASES_URL ?? releasesUrl);
+        if (configured.protocol === 'https:')
+            releasesUrl = configured.href;
+    } catch {
+        releasesUrl = DEFAULT_RELEASES_URL;
+    }
+    void shell.openExternal(releasesUrl);
+}
 
 function getRendererUrl(): string {
     const url = new URL(
@@ -225,6 +238,9 @@ app.whenReady().then(async () => {
     });
     const tray = new Tray(createTrayIcon());
     let applyQuizPause: (paused: boolean) => void = () => undefined;
+    const settings = await getSettings().catch(() => ({
+        preferences: DEFAULT_SETTINGS_PREFERENCES
+    }));
     const systemIntegration = new SystemIntegration({
         shortcutRegistrar: globalShortcut,
         tray: tray as TrayLike,
@@ -232,7 +248,6 @@ app.whenReady().then(async () => {
             template as MenuItemConstructorOptions[]
         ),
         powerMonitor,
-        fullscreenProbe: createWindowsFullscreenProbe(),
         onSelectionShortcut: () => {
             void systemIntegration.refreshSystemState();
             if (!petWindow.isDestroyed())
@@ -255,6 +270,7 @@ app.whenReady().then(async () => {
             petWindow.focus();
         },
         onOpenSettings: openSettingsWindow,
+        onCheckUpdates: openConfiguredReleasesPage,
         onPausedChange: (paused) => {
             applyQuizPause(paused);
         },
@@ -295,6 +311,14 @@ app.whenReady().then(async () => {
             listEntries,
             updateQuizSchedule
         },
+        initialPreferences: settings.preferences.quiz,
+        persistPreferences: async (quiz) => {
+            const current = await getSettings();
+            await saveSettings({
+                ...current.preferences,
+                quiz
+            });
+        },
         canStartQuiz: () => systemIntegration.canStartQuiz(),
         canAnswerQuiz: () => systemIntegration.canAnswerQuiz()
     });
@@ -311,7 +335,11 @@ app.whenReady().then(async () => {
             saveProvider,
             saveSettings: (preferences) => systemIntegration.applySettings(
                 preferences,
-                saveSettings
+                async (nextPreferences) => {
+                    const state = await saveSettings(nextPreferences);
+                    quizScheduler.applyPersistedPreferences(state.preferences.quiz);
+                    return state;
+                }
             ),
             setActiveProvider,
             getProviderSummaries,
@@ -348,9 +376,6 @@ app.whenReady().then(async () => {
         },
         openSettings: openSettingsWindow
     });
-    const settings = await getSettings().catch(() => ({
-        preferences: DEFAULT_SETTINGS_PREFERENCES
-    }));
     await systemIntegration.setSuppressionPolicy(settings.preferences.performance);
     try {
         await systemIntegration.registerShortcuts({

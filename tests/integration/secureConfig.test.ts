@@ -431,8 +431,8 @@ describe('secure provider configuration', () => {
         expect(result).toEqual({
             ok: false,
             error: {
-                code: 'storage-error',
-                message: 'Provider storage could not be updated.'
+                code: 'request-failed',
+                message: 'Provider request failed.'
             }
         });
         expect(JSON.stringify(result).includes(SYNTHETIC_API_KEY)).toBe(false);

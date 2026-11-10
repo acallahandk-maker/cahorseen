@@ -24,7 +24,6 @@ import {
     quizQuestionRequestSchema,
     quizQuestionSchema,
     providerDetailsSchema,
-    providerErrorCodeSchema,
     providerSaveConfigSchema,
     providerDeleteSchema,
     providerSummarySchema,
@@ -65,6 +64,10 @@ import {
     providerErrorMessage,
     validateProviderConfig
 } from './services/openAiClient';
+import {
+    SecureConfigError,
+    type SecureConfigErrorCode
+} from './services/secureConfig';
 import type { SelectionTranslationOptions } from './services/selectionService';
 import type { ScreenshotTranslationOptions } from './services/screenshotService';
 
@@ -137,6 +140,7 @@ type IpcFailure = {
             | 'suppressed'
             | MemoryErrorCode
             | ProviderErrorCode
+            | SecureConfigErrorCode
             | TranslationError['code'];
         message: string;
     };
@@ -221,14 +225,10 @@ function failure(
 }
 
 function safeFailure(error: unknown): IpcFailure {
-    if (error instanceof Error) {
-        const code = (error as Error & { code?: unknown }).code;
-        const parsedCode = providerErrorCodeSchema.safeParse(code);
-        if (parsedCode.success)
-            return failure(parsedCode.data, providerErrorMessage(parsedCode.data));
-        if (['SecureConfigError', 'ProviderError'].includes(error.name))
-            return failure('invalid-config', providerErrorMessage('invalid-config'));
-    }
+    if (error instanceof ProviderError)
+        return failure(error.code, providerErrorMessage(error.code));
+    if (error instanceof SecureConfigError)
+        return failure(error.code, error.message);
     return failure('request-failed', 'Provider request failed.');
 }
 

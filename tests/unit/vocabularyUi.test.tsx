@@ -115,14 +115,18 @@ function preferencesFixture(): SettingsPreferences {
         hotkey: 'Ctrl+Shift+T',
         screenshotHotkey: 'Ctrl+Shift+S',
         privacy: {
-            localOnly: true,
-            saveTranslationHistory: true,
-            restoreClipboard: true
+            saveTranslationHistory: true
         },
         performance: {
             reduceMotion: false,
-            pauseWhenFullscreen: true,
-            limitFrameRate: true
+            pauseWhenFullscreen: true
+        },
+        quiz: {
+            paused: false,
+            frequencyWeights: {
+                occurrenceCount: 1,
+                recentOccurrenceCount: 0.25
+            }
         }
     };
 }

@@ -28,6 +28,7 @@ interface SmokeResult {
     payload: SmokePayload;
     windowCount: number;
     url: string;
+    sandboxDisabled: boolean;
 }
 
 let settled = false;
@@ -220,7 +221,8 @@ export function runSmokeModeIfEnabled(window: BrowserWindowType): boolean {
                 scenario,
                 payload,
                 windowCount: BrowserWindow.getAllWindows().length,
-                url: window.webContents.getURL()
+                url: window.webContents.getURL(),
+                sandboxDisabled: process.argv.includes('--no-sandbox')
             });
         })().catch(exitWithError);
     };

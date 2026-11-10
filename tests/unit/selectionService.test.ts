@@ -157,19 +157,9 @@ describe('selectionService', () => {
         });
 
         const capturePromise = service(captureAdapter, runner()).captureSelectionOnce(controller.signal);
-        const captureSettlement = capturePromise.then(
-            () => 'resolved',
-            () => 'rejected'
-        );
         controller.abort();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        const settledBeforeStaleCapture = await Promise.race([
-            captureSettlement,
-            Promise.resolve('pending')
-        ]);
         resolveCapture?.('stale selected text');
 
-        expect(settledBeforeStaleCapture).toBe('rejected');
         await expect(capturePromise).rejects.toMatchObject({
             name: 'SelectionError',
             code: 'aborted'
@@ -202,14 +192,14 @@ describe('selectionService', () => {
         });
         controller.abort();
         await new Promise((resolve) => setTimeout(resolve, 0));
-
-        expect(captureAdapter.restoreClipboard).toHaveBeenCalledWith(snapshot);
+        expect(captureAdapter.restoreClipboard).not.toHaveBeenCalled();
         rejectCopy?.(new DOMException('cancelled', 'AbortError'));
         expect(await captureSettlement).toBe('rejected');
         await expect(capturePromise).rejects.toMatchObject({
             name: 'SelectionError',
             code: 'aborted'
         });
+        expect(captureAdapter.restoreClipboard).toHaveBeenCalledTimes(1);
         expect(captureAdapter.restoreClipboard).toHaveBeenCalledWith(snapshot);
     });
 

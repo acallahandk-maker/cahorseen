@@ -67,14 +67,18 @@ const preferences: SettingsPreferences = {
     hotkey: 'Ctrl+Shift+T',
     screenshotHotkey: 'Ctrl+Shift+S',
     privacy: {
-        localOnly: true,
-        saveTranslationHistory: false,
-        restoreClipboard: true
+        saveTranslationHistory: false
     },
     performance: {
         reduceMotion: false,
-        pauseWhenFullscreen: true,
-        limitFrameRate: true
+        pauseWhenFullscreen: true
+    },
+    quiz: {
+        paused: false,
+        frequencyWeights: {
+            occurrenceCount: 1,
+            recentOccurrenceCount: 0.25
+        }
     }
 };
 

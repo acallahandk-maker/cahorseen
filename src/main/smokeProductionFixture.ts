@@ -21,7 +21,6 @@ import {
 } from './services/resourceMetrics';
 import {
     SystemIntegration,
-    type FullscreenProbe,
     type PowerMonitorLike,
     type ShortcutRegistrar,
     type TrayLike
@@ -161,12 +160,6 @@ function createTray(): TrayLike {
     };
 }
 
-function createFullscreenProbe(): FullscreenProbe {
-    return {
-        read: async () => ({ fullscreen: false })
-    };
-}
-
 export interface ProductionSmokeFixture {
     dispose(): Promise<void>;
     snapshot(): {
@@ -292,11 +285,11 @@ export async function createProductionSmokeFixture(
         tray: createTray(),
         buildMenu: () => undefined,
         powerMonitor: createPowerMonitor(),
-        fullscreenProbe: createFullscreenProbe(),
         onSelectionShortcut: () => undefined,
         onScreenshotShortcut: () => undefined,
         onShow: () => undefined,
         onOpenSettings: () => undefined,
+        onCheckUpdates: () => undefined,
         onPausedChange: (paused) => {
             void quiz.setQuizPreferences({ paused });
         },

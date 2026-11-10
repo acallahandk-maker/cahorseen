@@ -15,6 +15,7 @@ $performanceDocPath = Join-Path $projectRoot 'docs/operations/performance.md'
 $screenshotServicePath = Join-Path $projectRoot 'src/main/services/screenshotService.ts'
 $fullFlowTestPath = Join-Path $projectRoot 'tests/electron/fullFlow.test.ts'
 $evidenceModulePath = Join-Path $projectRoot 'scripts/validate-release-evidence.mjs'
+$installedSmokePath = Join-Path $projectRoot 'scripts/smoke-installed.ps1'
 $outputDirectory = Join-Path $projectRoot 'out'
 
 function Assert-True {
@@ -61,6 +62,7 @@ $requiredFiles = @(
     (Join-Path $projectRoot 'scripts/profile-performance.mjs'),
     (Join-Path $projectRoot 'scripts/provision-live2d-assets.mjs'),
     $evidenceModulePath,
+    $installedSmokePath,
     $screenshotServicePath,
     $fullFlowTestPath
 )
@@ -72,6 +74,7 @@ $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json
 Assert-Contains $package.scripts.'validate:release' 'validate-release.ps1' 'validate:release script is not wired to validate-release.ps1'
 Assert-Contains $package.scripts.'profile:performance' 'profile-performance.mjs' 'profile:performance script is not wired to profile-performance.mjs'
 Assert-Contains $package.scripts.'build:windows' 'electron-builder --win' 'build:windows does not invoke electron-builder for Windows'
+Assert-Contains $package.scripts.'smoke:installed' 'smoke-installed.ps1' 'smoke:installed is not wired to smoke-installed.ps1'
 $nsisTargets = @($package.build.win.target | Where-Object { $_.target -eq 'nsis' })
 Assert-True ($nsisTargets.Count -eq 1) 'Windows build must target exactly one NSIS installer'
 
@@ -117,6 +120,27 @@ try {
     Assert-True ($screenshotSource -notmatch 'writeFile|createWriteStream') 'Screenshot service must not persist image bytes to disk'
     Assert-Contains $fullFlowTest 'persistedScreenshotFiles' 'Full-flow test must check for persisted screenshots'
     Assert-Contains $fullFlowTest 'leakedProcessIds' 'Full-flow test must check for leaked child processes'
+
+    $installer = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'dist') -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue |
+        Sort-Object -Property LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if ($null -eq $installer) {
+        Invoke-Checked 'npm' @('run', 'build:windows')
+        $installer = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'dist') -Filter '*-setup.exe' -File |
+            Sort-Object -Property LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+    }
+    Assert-True ($null -ne $installer) 'Windows installer was not produced by build:windows.'
+    Invoke-Checked 'npm' @('run', 'smoke:installed')
+
+    $installedEvidencePath = Join-Path $outputDirectory 'installed-smoke-evidence.json'
+    Assert-True (Test-Path -LiteralPath $installedEvidencePath -PathType Leaf) 'Installed smoke evidence is missing.'
+    $installedEvidence = Get-Content -LiteralPath $installedEvidencePath -Raw | ConvertFrom-Json
+    Assert-True ($installedEvidence.success -eq $true) 'Installed application smoke did not pass.'
+    Assert-True ($installedEvidence.sandboxDisabled -eq $false) 'Installed application smoke did not use the normal sandbox.'
+    Assert-True ($installedEvidence.shutdownAck -eq $true) 'Installed application shutdown acknowledgement is missing.'
+    Assert-True ($installedEvidence.exitCode -eq 0) 'Installed application smoke exited unsuccessfully.'
+    Assert-True ($installedEvidence.installerSizeBytes -eq $installer.Length) 'Installed smoke evidence has the wrong installer size.'
 }
 finally {
     Pop-Location
@@ -125,3 +149,5 @@ finally {
 Write-Host 'Release validation passed.'
 Write-Host "Dependency review: $reviewPath"
 Write-Host "Performance profile: $profilePath"
+Write-Host "Installer: $($installer.FullName) ($($installer.Length) bytes)"
+Write-Host "Installed smoke evidence: $installedEvidencePath"

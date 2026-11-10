@@ -77,14 +77,18 @@ const defaultPreferences: SettingsPreferences = settingsPreferencesSchema.parse(
     hotkey: 'Ctrl+Shift+T',
     screenshotHotkey: 'Ctrl+Shift+S',
     privacy: {
-        localOnly: true,
-        saveTranslationHistory: false,
-        restoreClipboard: true
+        saveTranslationHistory: false
     },
     performance: {
         reduceMotion: false,
-        pauseWhenFullscreen: true,
-        limitFrameRate: true
+        pauseWhenFullscreen: true
+    },
+    quiz: {
+        paused: false,
+        frequencyWeights: {
+            occurrenceCount: 1,
+            recentOccurrenceCount: 0.25
+        }
     }
 });
 
@@ -732,21 +736,16 @@ export default function SettingsWindow({
             </section>
             <section aria-label="Privacy">
                 <h2>Privacy</h2>
-                <label><input type="checkbox" checked={preferences.privacy.localOnly} onChange={(event) => setPreferences({
-                    ...preferences,
-                    privacy: { ...preferences.privacy, localOnly: event.target.checked }
-                })} /> Local-only processing</label>
+                <p>Vocabulary memory storage: Local only.</p>
+                <p>Translation source text is sent to the configured remote provider for translation.</p>
                 <label><input type="checkbox" checked={preferences.privacy.saveTranslationHistory} onChange={(event) => setPreferences({
                     ...preferences,
                     privacy: { ...preferences.privacy, saveTranslationHistory: event.target.checked }
-                })} /> Save translation history</label>
-                <label><input type="checkbox" checked={preferences.privacy.restoreClipboard} onChange={(event) => setPreferences({
-                    ...preferences,
-                    privacy: { ...preferences.privacy, restoreClipboard: event.target.checked }
-                })} /> Restore clipboard</label>
+                })} /> Save translation history to vocabulary memory</label>
             </section>
             <section aria-label="Performance">
                 <h2>Performance</h2>
+                <p>Power-aware frame-rate limiting is always enabled.</p>
                 <label><input type="checkbox" checked={preferences.performance.reduceMotion} onChange={(event) => setPreferences({
                     ...preferences,
                     performance: { ...preferences.performance, reduceMotion: event.target.checked }
@@ -755,10 +754,47 @@ export default function SettingsWindow({
                     ...preferences,
                     performance: { ...preferences.performance, pauseWhenFullscreen: event.target.checked }
                 })} /> Pause when fullscreen</label>
-                <label><input type="checkbox" checked={preferences.performance.limitFrameRate} onChange={(event) => setPreferences({
-                    ...preferences,
-                    performance: { ...preferences.performance, limitFrameRate: event.target.checked }
-                })} /> Limit frame rate</label>
+            </section>
+            <section aria-label="Quiz frequency">
+                <h2>Quiz frequency</h2>
+                <label>
+                    Total occurrence weight
+                    <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={preferences.quiz.frequencyWeights.occurrenceCount}
+                        onChange={(event) => setPreferences({
+                            ...preferences,
+                            quiz: {
+                                ...preferences.quiz,
+                                frequencyWeights: {
+                                    ...preferences.quiz.frequencyWeights,
+                                    occurrenceCount: Number(event.target.value)
+                                }
+                            }
+                        })}
+                    />
+                </label>
+                <label>
+                    Recent occurrence weight
+                    <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={preferences.quiz.frequencyWeights.recentOccurrenceCount}
+                        onChange={(event) => setPreferences({
+                            ...preferences,
+                            quiz: {
+                                ...preferences.quiz,
+                                frequencyWeights: {
+                                    ...preferences.quiz.frequencyWeights,
+                                    recentOccurrenceCount: Number(event.target.value)
+                                }
+                            }
+                        })}
+                    />
+                </label>
                 <button type="button" disabled={loading} onClick={() => void savePreferences()}>
                     Save preferences
                 </button>
@@ -774,7 +810,6 @@ export default function SettingsWindow({
                         virtualization={vocabulary?.virtualization}
                         repository={vocabularyRepository ?? vocabulary?.repository}
                         memoryPaused={vocabulary?.memoryPaused}
-                        privacyLocalOnly={preferences.privacy.localOnly}
                     />
                 </section>
             )}

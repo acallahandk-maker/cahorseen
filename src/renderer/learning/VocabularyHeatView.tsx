@@ -46,7 +46,6 @@ export interface VocabularyHeatViewProps {
     repository?: VocabularyRepositoryFacade;
     actions?: VocabularyUiActions;
     memoryPaused?: boolean;
-    privacyLocalOnly?: boolean;
     virtualization?: VocabularyVirtualizationOptions;
 }
 
@@ -286,7 +285,6 @@ export function VocabularyHeatView({
     repository,
     actions,
     memoryPaused: providedMemoryPaused,
-    privacyLocalOnly = true,
     virtualization
 }: VocabularyHeatViewProps): React.JSX.Element {
     const stableNowMs = useRef(
@@ -716,9 +714,7 @@ export function VocabularyHeatView({
                             : 'Vocabulary memory active'}
                 </p>
                 <p role="status" aria-label="Vocabulary privacy">
-                    {privacyLocalOnly
-                        ? 'Local-only vocabulary storage and processing'
-                        : 'Network-assisted vocabulary processing'}
+                    Local-only vocabulary memory storage. Translation source text is sent to the configured remote provider.
                 </p>
                 {actionError === undefined ? null : (
                     <p role="alert" aria-label="Vocabulary action error">{actionError}</p>

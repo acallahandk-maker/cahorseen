@@ -9,8 +9,10 @@ import {
     type ProviderDetails,
     type ProviderSaveConfig,
     type ProviderSummary,
+    capturedImageSchema,
     providerDetailsSchema,
     settingsPreferencesSchema,
+    type CapturedImage,
     type SettingsPreferences,
     type SettingsState
 } from '../../shared/contracts';
@@ -83,16 +85,48 @@ export const DEFAULT_SETTINGS_PREFERENCES: SettingsPreferences = {
     hotkey: 'Ctrl+Shift+T',
     screenshotHotkey: 'Ctrl+Shift+S',
     privacy: {
-        localOnly: true,
-        saveTranslationHistory: false,
-        restoreClipboard: true
+        saveTranslationHistory: false
     },
     performance: {
         reduceMotion: false,
-        pauseWhenFullscreen: true,
-        limitFrameRate: true
+        pauseWhenFullscreen: true
+    },
+    quiz: {
+        paused: false,
+        frequencyWeights: {
+            occurrenceCount: 1,
+            recentOccurrenceCount: 0.25
+        }
     }
 };
+
+const VISION_PROBE_IMAGE_BASE64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY1BYte8/AAT+AogiBwaJAAAAAElFTkSuQmCC';
+
+export const VISION_PROBE_IMAGE: CapturedImage = {
+    dataUrl: `data:image/png;base64,${VISION_PROBE_IMAGE_BASE64}`,
+    mimeType: 'image/png',
+    width: 1,
+    height: 1,
+    byteLength: 120
+};
+
+export function getVisionProbeImage(): CapturedImage {
+    const image = capturedImageSchema.parse(VISION_PROBE_IMAGE);
+    const bytes = Buffer.from(VISION_PROBE_IMAGE_BASE64, 'base64');
+    const validPng = bytes.length === image.byteLength
+        && bytes.subarray(0, 8).equals(Buffer.from([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+        ]))
+        && bytes.readUInt32BE(8) === 13
+        && bytes.subarray(12, 16).toString('ascii') === 'IHDR'
+        && bytes.readUInt32BE(16) === 1
+        && bytes.readUInt32BE(20) === 1
+        && bytes.subarray(bytes.length - 8, bytes.length - 4).toString('ascii') === 'IEND';
+    if (!validPng)
+        throw new SecureConfigError('invalid-config');
+    return image;
+}
 
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     {
@@ -135,11 +169,39 @@ const storedProviderSchema = z.strictObject({
 });
 
 type StoredProvider = z.infer<typeof storedProviderSchema>;
+function normalizeStoredPreferences(value: unknown): unknown {
+    if (typeof value !== 'object' || value === null)
+        return value;
+    const record = value as Record<string, unknown>;
+    const privacy = typeof record.privacy === 'object' && record.privacy !== null
+        ? record.privacy as Record<string, unknown>
+        : {};
+    const performance = typeof record.performance === 'object' && record.performance !== null
+        ? record.performance as Record<string, unknown>
+        : {};
+    return {
+        hotkey: record.hotkey,
+        screenshotHotkey: record.screenshotHotkey ?? 'Ctrl+Shift+S',
+        privacy: {
+            saveTranslationHistory: privacy.saveTranslationHistory ?? false
+        },
+        performance: {
+            reduceMotion: performance.reduceMotion ?? false,
+            pauseWhenFullscreen: performance.pauseWhenFullscreen ?? true
+        },
+        quiz: record.quiz ?? DEFAULT_SETTINGS_PREFERENCES.quiz
+    };
+}
+
+const storedPreferencesSchema = z.preprocess(
+    normalizeStoredPreferences,
+    settingsPreferencesSchema
+);
 const storedStateSchema = z.strictObject({
     version: z.literal(1),
     activeProviderId: z.string().min(1).optional(),
     providers: z.array(storedProviderSchema),
-    preferences: settingsPreferencesSchema.optional()
+    preferences: storedPreferencesSchema.optional()
 });
 const persistedStateSchema = z.union([
     storedStateSchema,
@@ -320,13 +382,7 @@ export class SecureConfigService {
             } else {
                 await client.translateImage({
                     provider,
-                    image: {
-                        dataUrl: 'data:image/png;base64,AA==',
-                        mimeType: 'image/png',
-                        width: 1,
-                        height: 1,
-                        byteLength: 1
-                    },
+                    image: getVisionProbeImage(),
                     targetLanguage: 'English'
                 }, options.signal);
             }

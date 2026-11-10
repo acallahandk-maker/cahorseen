@@ -168,7 +168,9 @@ describe('production memory recording', () => {
     });
 
     it('never records placeholder screenshot sources when vision output lacks source text', async () => {
-        const recordTranslation = vi.fn(async () => undefined);
+        const recordTranslation = vi.fn(async () => {
+            throw new MemoryDatabaseError('invalid-request', 'Source text is empty.');
+        });
         const service = new ScreenshotService({
             captureAdapter: screenshotAdapter(),
             translationRunner: {
@@ -199,7 +201,9 @@ describe('production memory recording', () => {
             code: 'invalid-request',
             recoverable: true
         });
-        expect(recordTranslation).not.toHaveBeenCalled();
+        expect(recordTranslation).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            sourceText: ''
+        }));
     });
 
     it.each([
@@ -218,8 +222,10 @@ describe('production memory recording', () => {
         ],
         ['short padded encoded token', 'QUJDRA=='],
         ['long unspaced payload', 'A'.repeat(80)]
-    ])('rejects %s before memory recording', async (_kind, sourceText) => {
-        const recordTranslation = vi.fn(async () => undefined);
+    ])('rejects %s at the memory persistence boundary', async (_kind, sourceText) => {
+        const recordTranslation = vi.fn(async () => {
+            throw new MemoryDatabaseError('invalid-request', 'Source text is invalid.');
+        });
         const service = new ScreenshotService({
             captureAdapter: screenshotAdapter(),
             translationRunner: {
@@ -250,7 +256,9 @@ describe('production memory recording', () => {
             code: 'invalid-request',
             recoverable: true
         });
-        expect(recordTranslation).not.toHaveBeenCalled();
+        expect(recordTranslation).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            sourceText
+        }));
     });
 
     it.each([
@@ -286,7 +294,7 @@ describe('production memory recording', () => {
         });
 
         expect(completed.status).toBe('completed');
-        expect(completed.memoryStatus).toBeUndefined();
+        expect(completed.memoryStatus).toMatchObject({ state: 'recorded' });
         expect(recordTranslation).toHaveBeenCalledWith(expect.objectContaining({
             sourceText
         }));

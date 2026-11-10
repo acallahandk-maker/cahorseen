@@ -30,20 +30,16 @@ interface PowerMonitorLike {
     ): unknown;
 }
 
-interface FullscreenProbeLike {
-    read(signal: AbortSignal): Promise<{ fullscreen: boolean }>;
-}
-
 interface SystemIntegrationOptionsLike {
     shortcutRegistrar: ShortcutRegistrarLike;
     tray: TrayLike;
     buildMenu(template: MenuItemTemplateLike[]): unknown;
     powerMonitor: PowerMonitorLike;
-    fullscreenProbe: FullscreenProbeLike;
     onSelectionShortcut(): void;
     onScreenshotShortcut(): void;
     onShow(): void;
     onOpenSettings(): void;
+    onCheckUpdates(): void;
     onPausedChange(paused: boolean): void;
     onExit(): void;
 }
@@ -56,7 +52,6 @@ interface SystemIntegrationApi {
     setSuppressionPolicy(policy: {
         reduceMotion: boolean;
         pauseWhenFullscreen: boolean;
-        limitFrameRate: boolean;
     }): Promise<void>;
     setPresentationActive(active: boolean): void;
     togglePaused(): boolean;
@@ -143,9 +138,8 @@ function createHarness(overrides: Partial<SystemIntegrationOptionsLike> = {}): {
     shortcuts: FakeShortcutRegistrar;
     powerMonitor: FakePowerMonitor;
     tray: TrayLike & { menu?: unknown; destroyed: boolean };
-    probe: FullscreenProbeLike & { calls: number; aborts: number };
     callbacks: Record<
-        'selection' | 'screenshot' | 'show' | 'settings' | 'pause' | 'exit',
+        'selection' | 'screenshot' | 'show' | 'settings' | 'updates' | 'pause' | 'exit',
         ReturnType<typeof vi.fn>
     >;
 } {
@@ -161,20 +155,12 @@ function createHarness(overrides: Partial<SystemIntegrationOptionsLike> = {}): {
             this.destroyed = true;
         }
     };
-    const probe = {
-        calls: 0,
-        aborts: 0,
-        async read(signal: AbortSignal): Promise<{ fullscreen: boolean }> {
-            ++this.calls;
-            signal.addEventListener('abort', () => ++this.aborts, { once: true });
-            return { fullscreen: false };
-        }
-    };
     const callbacks = {
         selection: vi.fn(),
         screenshot: vi.fn(),
         show: vi.fn(),
         settings: vi.fn(),
+        updates: vi.fn(),
         pause: vi.fn(),
         exit: vi.fn()
     };
@@ -187,11 +173,11 @@ function createHarness(overrides: Partial<SystemIntegrationOptionsLike> = {}): {
             tray,
             buildMenu: (template) => template,
             powerMonitor,
-            fullscreenProbe: probe,
             onSelectionShortcut: callbacks.selection,
             onScreenshotShortcut: callbacks.screenshot,
             onShow: callbacks.show,
             onOpenSettings: callbacks.settings,
+            onCheckUpdates: callbacks.updates,
             onPausedChange: callbacks.pause,
             onExit: callbacks.exit,
             ...overrides
@@ -199,7 +185,6 @@ function createHarness(overrides: Partial<SystemIntegrationOptionsLike> = {}): {
         shortcuts,
         powerMonitor,
         tray,
-        probe,
         callbacks
     };
 }
@@ -288,14 +273,14 @@ describe('SystemIntegration tray', () => {
         const harness = createHarness();
         await harness.integration.setSuppressionPolicy({
             reduceMotion: false,
-            pauseWhenFullscreen: true,
-            limitFrameRate: true
+            pauseWhenFullscreen: true
         });
 
         const menu = harness.tray.menu as MenuItemTemplateLike[];
         expect(menu.map((item) => item.label)).toEqual([
             'Show',
             'Settings',
+            'Check updates',
             'Pause',
             undefined,
             'Exit'
@@ -303,8 +288,10 @@ describe('SystemIntegration tray', () => {
         menu[0].click?.();
         menu[1].click?.();
         menu[2].click?.();
+        menu[3].click?.();
         expect(harness.callbacks.show).toHaveBeenCalledTimes(1);
         expect(harness.callbacks.settings).toHaveBeenCalledTimes(1);
+        expect(harness.callbacks.updates).toHaveBeenCalledTimes(1);
         expect(harness.callbacks.pause).toHaveBeenCalledWith(true);
         expect(harness.integration.getPerformanceMode()).toEqual({
             reason: 'paused',
@@ -313,31 +300,27 @@ describe('SystemIntegration tray', () => {
         });
 
         const resumedMenu = harness.tray.menu as MenuItemTemplateLike[];
-        expect(resumedMenu[2].label).toBe('Resume');
-        resumedMenu[2].click?.();
+        expect(resumedMenu[3].label).toBe('Resume');
+        resumedMenu[3].click?.();
         expect(harness.callbacks.pause).toHaveBeenLastCalledWith(false);
-        resumedMenu[4].click?.();
+        resumedMenu[5].click?.();
         expect(harness.callbacks.exit).toHaveBeenCalledTimes(1);
     });
 });
 
 describe('SystemIntegration shutdown', () => {
-    it('disposes shortcuts tray power listeners and pending one-shot reads idempotently', async () => {
+    it('disposes shortcuts tray and power listeners idempotently', async () => {
         const harness = createHarness();
         await harness.integration.registerShortcuts({
             selection: 'Ctrl+Shift+T',
             screenshot: 'Ctrl+Shift+S'
         });
-        const refresh = harness.integration.refreshSystemState();
-
         await harness.integration.dispose();
         await harness.integration.dispose();
-        await refresh;
 
         expect(harness.shortcuts.listeners.size).toBe(0);
         expect(harness.tray.destroyed).toBe(true);
         expect(harness.powerMonitor.listenerCount()).toBe(0);
-        expect(harness.probe.aborts).toBe(1);
     });
 });
 
@@ -350,8 +333,7 @@ describe('SystemIntegration settings transactions', () => {
         });
         await harness.integration.setSuppressionPolicy({
             reduceMotion: false,
-            pauseWhenFullscreen: true,
-            limitFrameRate: true
+            pauseWhenFullscreen: true
         });
         const applySettings = (
             harness.integration as unknown as {
@@ -362,7 +344,6 @@ describe('SystemIntegration settings transactions', () => {
                         performance: {
                             reduceMotion: boolean;
                             pauseWhenFullscreen: boolean;
-                            limitFrameRate: boolean;
                         };
                     },
                     persist: () => Promise<unknown>
@@ -378,8 +359,7 @@ describe('SystemIntegration settings transactions', () => {
                 screenshotHotkey: 'Alt+P',
                 performance: {
                     reduceMotion: true,
-                    pauseWhenFullscreen: false,
-                    limitFrameRate: true
+                    pauseWhenFullscreen: false
                 }
             },
             async () => {

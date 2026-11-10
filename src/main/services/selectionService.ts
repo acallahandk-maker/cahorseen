@@ -23,7 +23,7 @@ import {
     TranslationWorkerRunner,
     type TranslationRunner
 } from '../workers/translationWorker';
-import { getActiveProviderConfig } from './secureConfig';
+import { getActiveProviderConfig, getSettings } from './secureConfig';
 import {
     memoryFailureStatus,
     memoryRecordedStatus,
@@ -47,6 +47,7 @@ export interface SelectionServiceOptions {
     createId?: () => string;
     recordTranslation?: (task: TranslationTask) => Promise<void>;
     onMemoryStatus?: (status: MemoryPersistenceStatus) => void;
+    isTranslationHistoryEnabled?: () => boolean | Promise<boolean>;
 }
 
 export interface SelectionTranslationOptions {
@@ -95,25 +96,17 @@ function isAbortError(error: unknown): boolean {
 function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
     if (signal === undefined)
         return operation;
-    return new Promise<T>((resolve, reject) => {
-        let settled = false;
-        const finish = (callback: () => void): void => {
-            if (settled)
-                return;
-            settled = true;
-            signal.removeEventListener('abort', abort);
-            callback();
-        };
-        const abort = (): void => {
-            finish(() => reject(new SelectionError('aborted')));
-        };
+    let removeAbortListener: (() => void) | undefined;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+        const abort = (): void => reject(new SelectionError('aborted'));
+        removeAbortListener = () => signal.removeEventListener('abort', abort);
         signal.addEventListener('abort', abort, { once: true });
-        operation.then(
-            (value) => finish(() => resolve(value)),
-            (error) => finish(() => reject(error))
-        );
         if (signal.aborted)
             abort();
+    });
+    abortPromise.catch(() => undefined);
+    return Promise.race([operation, abortPromise]).finally(() => {
+        removeAbortListener?.();
     });
 }
 
@@ -167,6 +160,7 @@ export class SelectionService {
     private readonly createId: () => string;
     private readonly recordTranslation: ((task: TranslationTask) => Promise<void>) | undefined;
     private readonly onMemoryStatus: ((status: MemoryPersistenceStatus) => void) | undefined;
+    private readonly isTranslationHistoryEnabled: () => boolean | Promise<boolean>;
 
     constructor(options: SelectionServiceOptions) {
         this.captureAdapter = options.captureAdapter;
@@ -175,6 +169,7 @@ export class SelectionService {
         this.createId = options.createId ?? randomUUID;
         this.recordTranslation = options.recordTranslation;
         this.onMemoryStatus = options.onMemoryStatus;
+        this.isTranslationHistoryEnabled = options.isTranslationHistoryEnabled ?? (() => true);
     }
 
     async captureSelectionOnce(signal?: AbortSignal): Promise<SelectionCapture> {
@@ -183,7 +178,7 @@ export class SelectionService {
 
         try {
             const sourceText = normalizeSelection(
-                await abortable(this.captureAdapter.readAccessibilitySelection(signal), signal)
+                await this.captureAdapter.readAccessibilitySelection(signal)
             );
             throwIfAborted(signal);
             return {
@@ -194,7 +189,10 @@ export class SelectionService {
         } catch (error) {
             if (error instanceof SelectionError && error.code === 'invalid-selection')
                 throw error;
-            if (isAbortError(error) || (signal !== undefined && signal.aborted))
+            if (
+                !(error instanceof SelectionError && error.code === 'empty-selection')
+                && (isAbortError(error) || (signal !== undefined && signal.aborted))
+            )
                 throw new SelectionError('aborted');
         }
 
@@ -297,6 +295,14 @@ export class SelectionService {
     private async persistCompletedTask(task: TranslationTask): Promise<TranslationTask> {
         if (this.recordTranslation === undefined)
             return task;
+        let historyEnabled: boolean;
+        try {
+            historyEnabled = await this.isTranslationHistoryEnabled();
+        } catch {
+            return task;
+        }
+        if (!historyEnabled)
+            return task;
         try {
             const recordedTask = {
                 ...task,
@@ -330,41 +336,18 @@ export class SelectionService {
 
         let capture: SelectionCapture | undefined;
         let captureError: unknown;
-        let copySettled = false;
         let readStarted = false;
-        let readSettled = false;
         let readOperationPromise: Promise<string> | undefined;
-        let restoreQueue: Promise<void> = Promise.resolve();
-        const restoreClipboard = (): Promise<void> => {
-            const next = restoreQueue.then(async () => {
-                await this.captureAdapter.restoreClipboard(snapshot);
-            });
-            restoreQueue = next.catch(() => undefined);
-            return next;
-        };
         const copyOperation = Promise.resolve()
-            .then(() => this.captureAdapter.copySelectionToClipboard(signal))
-            .then(() => {
-                copySettled = true;
-            }, (error) => {
-                copySettled = true;
-                throw error;
-            });
+            .then(() => this.captureAdapter.copySelectionToClipboard(signal));
         const startReadOperation = (): Promise<string> => {
             readStarted = true;
             readOperationPromise = Promise.resolve()
-                .then(() => this.captureAdapter.readClipboardText(signal))
-                .then((value) => {
-                    readSettled = true;
-                    return value;
-                }, (error) => {
-                    readSettled = true;
-                    throw error;
-                });
+                .then(() => this.captureAdapter.readClipboardText(signal));
             return readOperationPromise;
         };
         try {
-            await abortable(copyOperation, signal);
+            await copyOperation;
             throwIfAborted(signal);
             capture = {
                 sourceText: normalizeSelection(await abortable(startReadOperation(), signal)),
@@ -376,21 +359,16 @@ export class SelectionService {
             captureError = error;
         }
 
+        const pendingOperations: Promise<unknown>[] = [copyOperation];
+        if (readStarted && readOperationPromise !== undefined)
+            pendingOperations.push(readOperationPromise);
+        await Promise.allSettled(pendingOperations);
+
         let restoreError: unknown;
         try {
-            await restoreClipboard();
+            await this.captureAdapter.restoreClipboard(snapshot);
         } catch (error) {
             restoreError = error;
-        }
-
-        if (signal?.aborted === true && (!copySettled || !readSettled)) {
-            const pendingOperations: Promise<unknown>[] = [
-                copySettled ? Promise.resolve() : copyOperation
-            ];
-            if (readStarted && !readSettled && readOperationPromise !== undefined)
-                pendingOperations.push(readOperationPromise);
-            void Promise.allSettled(pendingOperations)
-                .then(() => restoreClipboard().catch(() => undefined));
         }
         if (restoreError !== undefined)
             throw new SelectionError('clipboard-restore');
@@ -481,7 +459,14 @@ async function getDefaultService(): Promise<SelectionService> {
             workerPath: join(__dirname, 'translationWorker.js')
         }),
         getProvider: getActiveProviderConfig,
-        recordTranslation: recordTranslationMemory
+        recordTranslation: recordTranslationMemory,
+        isTranslationHistoryEnabled: async () => {
+            try {
+                return (await getSettings()).preferences.privacy.saveTranslationHistory;
+            } catch {
+                return false;
+            }
+        }
     });
     return defaultService;
 }

@@ -231,7 +231,7 @@ describe('OpenAI-compatible translation client', () => {
         ],
         ['short padded encoded token', 'QUJDRA=='],
         ['long unspaced payload', 'A'.repeat(80)]
-    ])('rejects %s before exposing structured image results', async (_kind, sourceText) => {
+    ])('preserves %s for persistence-only memory rejection', async (_kind, sourceText) => {
         const client = new OpenAiClient({
             fetchImpl: async () => jsonResponse({
                 choices: [{
@@ -256,7 +256,11 @@ describe('OpenAI-compatible translation client', () => {
             },
             targetLanguage: 'en',
             structuredResponse: true
-        })).rejects.toMatchObject({ code: 'invalid-response' });
+        })).resolves.toMatchObject({
+            sourceText: sourceText.trim(),
+            translatedText: 'Hello world',
+            model: 'synthetic-vision-model'
+        });
     });
 
     it.each([

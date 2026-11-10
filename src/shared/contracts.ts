@@ -623,15 +623,13 @@ export const settingsPreferencesSchema = z.strictObject({
         message: 'Use one or more modifiers plus exactly one known key.'
     }).default('Ctrl+Shift+S'),
     privacy: z.strictObject({
-        localOnly: z.boolean(),
-        saveTranslationHistory: z.boolean(),
-        restoreClipboard: z.boolean()
+        saveTranslationHistory: z.boolean()
     }),
     performance: z.strictObject({
         reduceMotion: z.boolean(),
-        pauseWhenFullscreen: z.boolean(),
-        limitFrameRate: z.boolean()
-    })
+        pauseWhenFullscreen: z.boolean()
+    }),
+    quiz: quizPreferencesSchema
 }).refine((preferences) => {
     return normalizeHotkey(preferences.hotkey)
         !== normalizeHotkey(preferences.screenshotHotkey);

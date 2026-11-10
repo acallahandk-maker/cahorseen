@@ -41,6 +41,15 @@ const CAPTURE_PLACEHOLDERS = new Set([
     'capture region',
     'image capture region'
 ]);
+const CAPTURE_PLACEHOLDER_VARIANTS = new Set([
+    'screenshot region captured',
+    'screenshot region redacted',
+    'screenshot region unavailable',
+    'screenshot region not available',
+    'screenshot region omitted',
+    'captured image redacted',
+    'captured image unavailable'
+]);
 
 function reject(reason: VocabularyTextRejectionReason): never {
     throw new VocabularyTextValidationError(reason);
@@ -59,7 +68,18 @@ function isCapturePlaceholder(value: string): boolean {
     );
     return CAPTURE_PLACEHOLDERS.has(words)
         || CAPTURE_PLACEHOLDERS.has(withoutLabel)
-        || withoutLabel.startsWith('screenshot region');
+        || CAPTURE_PLACEHOLDER_VARIANTS.has(words)
+        || /^screenshot region(?: \d{1,4})?$/u.test(words);
+}
+
+function hasSuspiciousSingleEncodedToken(value: string): boolean {
+    const candidate = value.trim();
+    if (!/^[a-z0-9+/_-]{32,}={0,2}$/iu.test(candidate))
+        return false;
+    const bytes = decodeBase64(candidate);
+    if (bytes === undefined)
+        return false;
+    return !decodeText(bytes).valid;
 }
 
 function isCanonicalPaddedBase64(base: string, padding: string): boolean {
@@ -144,14 +164,9 @@ function isBinaryPayload(bytes: Uint8Array, text: string, validUtf8: boolean): b
             || codePoint >= 0x7F && codePoint <= 0x9F)
             controlCount += 1;
     }
-    let highByteCount = 0;
-    for (const byte of bytes) {
-        if (byte >= 0x80)
-            highByteCount += 1;
-    }
     const byteLength = Math.max(bytes.length, 1);
     return controlCount / byteLength >= 0.05
-        || !validUtf8 && (controlCount >= 2 || highByteCount / byteLength >= 0.5);
+        || !validUtf8 && controlCount >= 2;
 }
 
 function isWrappedBase64(tokens: string[]): boolean {
@@ -228,6 +243,8 @@ export function validateVocabularySourceText(value: string): string {
         reject('capture-placeholder');
     if (hasPaddedEncodedToken(sourceText))
         reject('padded-encoded-token');
+    if (hasSuspiciousSingleEncodedToken(sourceText))
+        reject('suspicious-encoded-token');
     if (hasEncodedPayload(sourceText))
         reject('suspicious-encoded-token');
     return sourceText;
