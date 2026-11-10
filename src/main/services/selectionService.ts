@@ -177,8 +177,16 @@ export class SelectionService {
             throw new SelectionError('aborted');
 
         try {
+            let accessibilityOperation: Promise<string>;
+            try {
+                accessibilityOperation = Promise.resolve(
+                    this.captureAdapter.readAccessibilitySelection(signal)
+                );
+            } catch (error) {
+                accessibilityOperation = Promise.reject(error);
+            }
             const sourceText = normalizeSelection(
-                await this.captureAdapter.readAccessibilitySelection(signal)
+                await abortable(accessibilityOperation, signal)
             );
             throwIfAborted(signal);
             return {

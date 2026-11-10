@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +14,12 @@ import {
 } from '../../src/shared/contracts';
 
 const temporaryDirectories: string[] = [];
+const require = createRequire(import.meta.url);
+const electronPath = require('electron') as string;
+const nativeImageDecoderPath = join(
+    import.meta.dirname,
+    '../../scripts/electron-native-image-decoder.cjs'
+);
 const tinyPng = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY1BYte8/AAT+AogiBwaJAAAAAElFTkSuQmCC',
     'base64'
@@ -37,15 +45,40 @@ function providerConfig() {
     };
 }
 
+interface NativeImageDecodeResult {
+    width: number;
+    height: number;
+    isEmpty: boolean;
+    bitmapByteLength: number;
+    pngByteLength: number;
+    sourceDataUrlPrefix: string;
+    decodedDataUrlPrefix: string;
+}
+
+function decodePngWithElectronNativeImage(image: Buffer): NativeImageDecodeResult {
+    const dataUrl = `data:image/png;base64,${image.toString('base64')}`;
+    const stdout = execFileSync(electronPath, [
+        nativeImageDecoderPath,
+        dataUrl
+    ], {
+        encoding: 'utf8',
+        timeout: 15_000,
+        windowsHide: true
+    });
+    return JSON.parse(stdout) as NativeImageDecodeResult;
+}
+
 function assertPngDecoderValidity(image: Buffer): void {
-    expect(image.subarray(0, 8)).toEqual(Buffer.from([
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
-    ]));
-    expect(image.readUInt32BE(8)).toBe(13);
-    expect(image.subarray(12, 16).toString('ascii')).toBe('IHDR');
-    expect(image.readUInt32BE(16)).toBe(1);
-    expect(image.readUInt32BE(20)).toBe(1);
-    expect(image.subarray(image.length - 8, image.length - 4).toString('ascii')).toBe('IEND');
+    const decoded = decodePngWithElectronNativeImage(image);
+    expect(decoded, 'Electron nativeImage must decode the vision probe PNG').toMatchObject({
+        width: 1,
+        height: 1,
+        isEmpty: false
+    });
+    expect(decoded.bitmapByteLength, 'Decoded 1x1 bitmap must be non-empty').toBeGreaterThan(0);
+    expect(decoded.pngByteLength, 'Decoded PNG must re-encode to non-empty bytes').toBeGreaterThan(0);
+    expect(decoded.sourceDataUrlPrefix).toBe('data:image/png;base64,');
+    expect(decoded.decodedDataUrlPrefix).toBe('data:image/png;base64,');
 }
 
 afterEach(() => {

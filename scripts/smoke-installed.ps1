@@ -22,6 +22,26 @@ function Assert-True {
     }
 }
 
+function Get-Sha256Lower {
+    param(
+        [string]$Path
+    )
+
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $installer = Get-ChildItem -LiteralPath $distDirectory -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTimeUtc -Descending |
@@ -34,6 +54,7 @@ if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
 $InstallerPath = [IO.Path]::GetFullPath($InstallerPath)
 Assert-True (Test-Path -LiteralPath $InstallerPath -PathType Leaf) "Installer is missing: $InstallerPath"
 $installerItem = Get-Item -LiteralPath $InstallerPath
+$installerHash = Get-Sha256Lower $installerItem.FullName
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'desktop-pet-installed-smoke-' + [Guid]::NewGuid().ToString('N')
@@ -105,6 +126,7 @@ finally {
         timestamp = (Get-Date).ToUniversalTime().ToString('o')
         installerPath = $InstallerPath
         installerSizeBytes = $installerItem.Length
+        installerSha256 = $installerHash
         installedExecutable = Join-Path $installDirectory 'Desktop Pet Translator.exe'
         sandboxDisabled = if ($null -eq $marker) { $null } else { [bool]$marker.sandboxDisabled }
         shutdownAck = Test-Path -LiteralPath $shutdownAckPath -PathType Leaf

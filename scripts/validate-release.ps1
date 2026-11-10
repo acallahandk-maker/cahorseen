@@ -15,6 +15,7 @@ $performanceDocPath = Join-Path $projectRoot 'docs/operations/performance.md'
 $screenshotServicePath = Join-Path $projectRoot 'src/main/services/screenshotService.ts'
 $fullFlowTestPath = Join-Path $projectRoot 'tests/electron/fullFlow.test.ts'
 $evidenceModulePath = Join-Path $projectRoot 'scripts/validate-release-evidence.mjs'
+$installerResolverPath = Join-Path $projectRoot 'scripts/resolve-current-installer.mjs'
 $installedSmokePath = Join-Path $projectRoot 'scripts/smoke-installed.ps1'
 $outputDirectory = Join-Path $projectRoot 'out'
 
@@ -49,6 +50,26 @@ function Invoke-Checked {
     Assert-True ($LASTEXITCODE -eq 0) "$Command $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
 }
 
+function Get-Sha256Lower {
+    param(
+        [string]$Path
+    )
+
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 if ($SkipProfile) {
     throw 'Release validation requires fresh performance evidence. -SkipProfile is not permitted.'
 }
@@ -62,6 +83,7 @@ $requiredFiles = @(
     (Join-Path $projectRoot 'scripts/profile-performance.mjs'),
     (Join-Path $projectRoot 'scripts/provision-live2d-assets.mjs'),
     $evidenceModulePath,
+    $installerResolverPath,
     $installedSmokePath,
     $screenshotServicePath,
     $fullFlowTestPath
@@ -121,17 +143,18 @@ try {
     Assert-Contains $fullFlowTest 'persistedScreenshotFiles' 'Full-flow test must check for persisted screenshots'
     Assert-Contains $fullFlowTest 'leakedProcessIds' 'Full-flow test must check for leaked child processes'
 
-    $installer = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'dist') -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue |
-        Sort-Object -Property LastWriteTimeUtc -Descending |
-        Select-Object -First 1
-    if ($null -eq $installer) {
-        Invoke-Checked 'npm' @('run', 'build:windows')
-        $installer = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'dist') -Filter '*-setup.exe' -File |
-            Sort-Object -Property LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-    }
-    Assert-True ($null -ne $installer) 'Windows installer was not produced by build:windows.'
-    Invoke-Checked 'npm' @('run', 'smoke:installed')
+    $buildStartedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Invoke-Checked 'npm' @('run', 'build:windows')
+
+    $currentInstallerJson = & node $installerResolverPath --root $projectRoot --built-after-ms $buildStartedAtMs
+    Assert-True ($LASTEXITCODE -eq 0) 'Current-build installer resolution failed.'
+    $currentInstaller = $currentInstallerJson | ConvertFrom-Json
+    $installer = Get-Item -LiteralPath $currentInstaller.path
+    Assert-True ($installer.Length -eq $currentInstaller.sizeBytes) 'Current-build installer size changed after resolution.'
+    $installerHash = Get-Sha256Lower $installer.FullName
+    Assert-True ($installerHash -eq $currentInstaller.sha256) 'Current-build installer hash changed after resolution.'
+
+    Invoke-Checked 'npm' @('run', 'smoke:installed', '--', '--InstallerPath', $installer.FullName)
 
     $installedEvidencePath = Join-Path $outputDirectory 'installed-smoke-evidence.json'
     Assert-True (Test-Path -LiteralPath $installedEvidencePath -PathType Leaf) 'Installed smoke evidence is missing.'
@@ -140,7 +163,9 @@ try {
     Assert-True ($installedEvidence.sandboxDisabled -eq $false) 'Installed application smoke did not use the normal sandbox.'
     Assert-True ($installedEvidence.shutdownAck -eq $true) 'Installed application shutdown acknowledgement is missing.'
     Assert-True ($installedEvidence.exitCode -eq 0) 'Installed application smoke exited unsuccessfully.'
+    Assert-True ($installedEvidence.installerPath -eq $installer.FullName) 'Installed smoke used a different installer path.'
     Assert-True ($installedEvidence.installerSizeBytes -eq $installer.Length) 'Installed smoke evidence has the wrong installer size.'
+    Assert-True ($installedEvidence.installerSha256 -eq $currentInstaller.sha256) 'Installed smoke evidence has the wrong installer hash.'
 }
 finally {
     Pop-Location
@@ -150,4 +175,5 @@ Write-Host 'Release validation passed.'
 Write-Host "Dependency review: $reviewPath"
 Write-Host "Performance profile: $profilePath"
 Write-Host "Installer: $($installer.FullName) ($($installer.Length) bytes)"
+Write-Host "Installer SHA256: $installerHash"
 Write-Host "Installed smoke evidence: $installedEvidencePath"

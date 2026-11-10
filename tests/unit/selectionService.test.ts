@@ -167,6 +167,45 @@ describe('selectionService', () => {
         expect(captureAdapter.saveClipboard).not.toHaveBeenCalled();
     });
 
+    it('settles cancellation before a signal-ignoring accessibility adapter settles', async () => {
+        const controller = new AbortController();
+        let rejectCapture: ((error: unknown) => void) | undefined;
+        const captureAdapter = adapter({
+            readAccessibilitySelection: vi.fn(() => new Promise<string>(
+                (_resolve, reject) => {
+                    rejectCapture = reject;
+                }
+            ))
+        });
+
+        const capturePromise = service(captureAdapter, runner()).captureSelectionOnce(controller.signal);
+        const captureSettlement = Promise.race([
+            capturePromise.then(
+                () => 'resolved',
+                () => 'rejected'
+            ),
+            new Promise<string>((resolve) => {
+                setTimeout(() => resolve('hung'), 50);
+            })
+        ]);
+
+        try {
+            controller.abort();
+            expect(await captureSettlement).toBe('rejected');
+            await expect(capturePromise).rejects.toMatchObject({
+                name: 'SelectionError',
+                code: 'aborted'
+            });
+            expect(captureAdapter.saveClipboard).not.toHaveBeenCalled();
+            expect(captureAdapter.copySelectionToClipboard).not.toHaveBeenCalled();
+            expect(captureAdapter.readClipboardText).not.toHaveBeenCalled();
+            expect(captureAdapter.restoreClipboard).not.toHaveBeenCalled();
+        } finally {
+            rejectCapture?.(new Error('late accessibility failure'));
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+    });
+
     it('restores clipboard contents when cancellation arrives during clipboard fallback', async () => {
         const controller = new AbortController();
         const snapshot = { items: ['original'] };
